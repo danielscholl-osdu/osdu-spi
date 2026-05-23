@@ -1,10 +1,14 @@
 # OSDU SPI CI/CD: Build, Deploy, Integration Test
 ## Detailed Design & Implementation Plan
 
-**Status:** Draft — pre-implementation design  
-**Authors:** Daniel Scholl (with Claude)  
-**Date:** 2026-05-22  
+**Status:** Draft v2 — pre-implementation design, post-review refinement
+**Authors:** Daniel Scholl (with Claude)
+**Date:** 2026-05-22 (v1), revised 2026-05-22 (v2)
 **Target System:** `Azure/osdu-spi` engineering template + `osdu-spi-stack` runtime + 8 service forks
+
+**Revision history:**
+- **v1** — initial design from brainstorming
+- **v2** — incorporated review findings: locked validate.yml-only deploy stages (D12); added per-service `K8S_DEPLOYMENT_NAME`/`K8S_CONTAINER_NAME` variables (D13); pinned trust boundaries for workflow events (D14, ADR-036); cascade-driven pushes deploy (D15); promoted Q6 to Phase 0 prerequisite; added OIDC validation step to Phase 0; added cross-service contamination / test data isolation handling (§8.8, §8.9); split Flux invariant into permanent steady state + planned-outage baseline refresh (§7.5); GHCR public-visibility compliance gate; expanded risks (R13–R17)
 
 ---
 
@@ -95,13 +99,14 @@ Without these signals, the only way to discover deployment regressions is at rel
 
 ### 2.2 Constraints (locked by user)
 
-- **C1.** Triggers match existing `build.yml`/`validate.yml`. Same branches, same paths, same cadence. New stages are appended jobs in the existing pipeline, not new workflows on different triggers.
-- **C2.** Container registry: **GHCR**, fork-owned. Packages must be **public** (decided by user) so AKS can pull without per-fork image-pull-secrets.
+- **C1.** New stages run on the same cadence as today's per-PR validation (PR events + push to `main`/`fork_integration`/`fork_upstream`). They are appended jobs in `template-workflows/validate.yml` **only**. `template-workflows/build.yml` keeps its Maven-build-only signal for feature-branch pushes — adding deploy stages there would cause duplicate `kubectl set image` calls to race on the same shared `Deployment` whenever both workflows fire on a PR sync event (see D12).
+- **C2.** Container registry: **GHCR**, fork-owned. Packages must be **public** (decided by user) so AKS can pull without per-fork image-pull-secrets. Public visibility must be confirmed acceptable under the publishing org's container-registry policy **before Phase 4**; the design's fallback if public is disallowed is documented in §7.4.
 - **C3.** Maven build restricted to **`-P partition-azure`** (or the Azure-equivalent profile for each service). Other cloud provider profiles are not built. Faster validate, smaller blast radius.
-- **C4.** Deploy target: **single shared `osdu-spi-stack` AKS environment**. Already running. Flux is **fully suspended** after initial bring-up so CI workflows have free reign.
-- **C5.** Deploy mechanism: **`kubectl set image`** directly on existing Deployments. No Helm from CI, no HelmRelease editing — Flux is suspended, deployments live untouched.
-- **C6.** Fork is independent at runtime: no cross-repo commits, no PRs to `osdu-spi-stack` from a service fork.
+- **C4.** Deploy target: **single shared `osdu-spi-stack` AKS environment**. Already running. Flux is **permanently suspended** as a steady state — not just "during CI" — because there is no per-service "CI mode" toggle for a shared cluster. Resuming Flux is a planned-outage operation requiring a CI freeze across all 8 forks (see §7.5, §8.2).
+- **C5.** Deploy mechanism: **`kubectl set image`** directly on existing Deployments. No Helm from CI, no HelmRelease editing — Flux is suspended, deployments live untouched. Requires the Helm chart in `osdu-spi-stack` to materialize each service's `Deployment` with a stable, predictable resource name and container name. These names are exposed as **per-service GitHub repo variables** (`K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`) rather than derived from `SERVICE_NAME`, to insulate CI from chart-naming changes (see D13).
+- **C6.** Fork is independent at runtime: no cross-repo commits, no PRs to `osdu-spi-stack` from a service fork. Forks do **share** infrastructure (cluster, gateway URL, Key Vault), so a shared-infrastructure change (gateway DNS, KV rename) is a coordinated update across all forks.
 - **C7.** Implementation must be proven in a sandbox fork of the engineering system before any change lands in `Azure/osdu-spi`.
+- **C8.** New deploy/integration-test jobs run only when the PR head repo equals the base repo (no `pull_request_target` from external forks), and never on `dependabot[bot]`. The shared cluster's federated identity must not be exposed to attacker-controlled PR code. See §5.5 for the trust-boundary model.
 
 ### 2.3 Non-goals
 
@@ -130,6 +135,10 @@ For traceability, here are the decisions made during brainstorming that this des
 | D9 | Federated identity (OIDC) for Actions → Azure | No long-lived secrets, per-fork managed identity |
 | D10 | Sandbox engineering system fork for development | Risk isolation — official template stays clean |
 | D11 | Existing `danielscholl-osdu/partition` is the reference fork | Avoids creating disposable test services |
+| D12 | New deploy/integration-test stages live in `validate.yml` only, not `build.yml` | Both workflows fire on PR sync today; deploying from both would race `kubectl set image` on the same `Deployment` |
+| D13 | Per-service repo variables for `K8S_DEPLOYMENT_NAME` and `K8S_CONTAINER_NAME`, not derived from `SERVICE_NAME` | Helm chart may name resources `osdu-spi-service-partition` / container `app`; service slug is not load-bearing on the cluster |
+| D14 | New stages do **not** run on `pull_request_target` from external forks, nor for `dependabot[bot]` | Cluster federated identity must never run attacker-controlled PR code; dependabot has its own validation path |
+| D15 | Cascade-driven pushes to `fork_integration` **do** trigger deploy+integration-test | Catches upstream regressions before they reach `main`; same trust level as merge-to-main |
 
 ---
 
@@ -253,11 +262,13 @@ Three identities total per CI run, all stitched through federated credentials. N
 - `devops/azure/Dockerfile` from service repo
 
 **Outputs:**
-- Image pushed to `ghcr.io/<org>/<service>:<sha>` (always)
-- Image pushed to `ghcr.io/<org>/<service>:<branch>` (on push)
-- Image pushed to `ghcr.io/<org>/<service>:<version>` (on release-please tag)
+- Image pushed to `ghcr.io/<org>/<service>:sha-<short-sha>` (always — primary, immutable, referenced by deploy)
+- Image pushed to `ghcr.io/<org>/<service>:<branch>-snapshot` on push to a protected branch (mutable, matches Maven `-Drevision=${branch}-SNAPSHOT`)
+- Image pushed to `ghcr.io/<org>/<service>:<version>` on release-please-created tag push (e.g. `:v1.2.3`)
 
-**Trigger:** Same as existing `build.yml` and `validate.yml`. Runs after `java-build` job succeeds.
+Deploy step always references the immutable `:sha-<short-sha>` (or its digest); branch/version tags are for humans.
+
+**Trigger:** Runs in `validate.yml` after `java-build` succeeds. Gated by `C8` — does **not** run for `pull_request_target` from an external head repo, nor for `dependabot[bot]`. See §5.5.
 
 **Implementation surface:**
 
@@ -289,8 +300,7 @@ outputs:
 - JAR artifact missing (java-build skipped or failed) → job is skipped (`needs: java-build`)
 - GHCR push fails (rate limit, network) → job fails, retried by re-running workflow
 - Image too large (>1GB) → warning surfaced, not blocking initially
-
-**Open question:** Should we tag with the Maven `revision` (`${branch}-SNAPSHOT`) as well, to match how java-build versions JARs today? Probably yes for traceability — image tag matches JAR version.
+- First-time push creates a new GHCR package as **private by default** — onboarding script (Phase 3) flips visibility to public via `gh api -X PATCH .../visibility`. Until that runs once per service, deploys will fail with `ErrImagePull`.
 
 ### 5.2 Deploy
 
@@ -317,19 +327,20 @@ outputs:
 
 ```
 inputs:
-  azure_client_id:        required (from repo secret/var)
+  azure_client_id:        required (from repo secret)
   azure_tenant_id:        required
   azure_subscription_id:  required
-  aks_resource_group:     required
-  aks_cluster_name:       required
-  namespace:              default 'osdu'
-  deployment_name:        required
-  container_name:         default same as deployment_name
-  image_ref:              required (full image:tag or image@digest)
+  aks_resource_group:     required (from org-level variable)
+  aks_cluster_name:       required (from org-level variable)
+  namespace:              required (from org-level variable, e.g. 'osdu')
+  deployment_name:        required (from per-service repo variable K8S_DEPLOYMENT_NAME — NOT derived from SERVICE_NAME, see D13)
+  container_name:         required (from per-service repo variable K8S_CONTAINER_NAME — chart may name the container 'app' or similar)
+  image_ref:              required (full image@digest preferred; image:tag accepted)
   rollout_timeout:        default '5m'
 
 outputs:
   rollout_status:         'success' | 'timeout' | 'failed'
+  deployed_digest:        sha256 digest actually running after rollout (for downstream pin-verification)
   pod_logs_url:           link to GitHub log artifact with pod logs on failure
 ```
 
@@ -348,17 +359,17 @@ if [ -n "$suspended" ]; then
 fi
 ```
 
-This is essential. Without it, a workflow run during Flux reconciliation will see its image revert mid-test, producing flaky failures with mysterious causes.
+This is essential as a fail-fast gate. **However**, a pre-flight check alone does **not** protect a long-running acceptance test from someone running `flux resume` mid-run. The integration-test job carries a **post-rollout digest verification** (§5.3) that re-reads the pod's current image and fails the run if it no longer matches the digest we just deployed.
 
-**Concurrency lock:**
+**Concurrency lock (per-service):**
 
 ```yaml
 concurrency:
-  group: spi-stack-osdu-deploy
+  group: spi-stack-${{ vars.SERVICE_NAME }}
   cancel-in-progress: false
 ```
 
-Cluster-wide lock. Only one service's deploy runs at a time. Prevents two services from racing each other into the same namespace. `cancel-in-progress: false` because cancelling a deploy mid-rollout leaves the cluster in a partially-deployed state.
+Per-service, not cluster-wide. Two different services' deploys can run in parallel because they target different `Deployment` resources; only same-service PR runs queue. `cancel-in-progress: false` because cancelling a deploy mid-rollout leaves the cluster in a partially-deployed state. See §8.1 for the trade-off and the conditions under which we'd escalate to a cluster-wide lock.
 
 **Failure modes:**
 - Azure login fails → check federated credential subject claim matches `repo:<org>/<repo>:ref:refs/heads/<branch>`
@@ -390,15 +401,17 @@ Cluster-wide lock. Only one service's deploy runs at a time. Prevents two servic
 
 ```
 inputs:
-  test_dir:               default '${service_name}-acceptance-test'
-  gateway_url:            required
-  keyvault_name:          required
-  secret_map:             JSON map of env-var-name → kv-secret-name
+  test_dir:               required (from per-service repo variable ACCEPTANCE_TEST_DIR; the partition convention is '<service>-acceptance-test' but verify per-service in Phase 5)
+  gateway_url:            required (from org-level variable GATEWAY_URL)
+  keyvault_name:          required (from org-level variable KEYVAULT_NAME)
+  secret_map:             required (from per-service repo variable ACCEPTANCE_TEST_SECRET_MAP — JSON map of env-var-name → kv-secret-name; differs per service)
   maven_goal:             default 'verify'
-  maven_profile:          optional
+  maven_profile:          optional (e.g. '<service>-azure')
+  expected_digest:        required (sha256 digest from deploy job; integration-test re-reads pod image and fails if mismatched — guards against mid-test Flux resume / pod restart with stale image)
+  cross_service_health:   default 'true' (probe gateway for each dependency service's /info endpoint before running tests; mark advisory if any are unhealthy — see §8.8)
 
 outputs:
-  test_result:            'pass' | 'fail'
+  test_result:            'pass' | 'fail' | 'advisory' (passed locally, but cluster state was unreliable)
   test_report_url:        link to uploaded JUnit XML artifact
 ```
 
@@ -423,7 +436,7 @@ This pattern matches how the partition acceptance tests expect their config (env
 
 ### 5.4 Cross-cutting: Build Pipeline Composition
 
-The full updated `template-workflows/validate.yml` (and parallel structure in `build.yml`) job graph:
+The updated `template-workflows/validate.yml` job graph (new jobs marked NEW). Per D12, these stages do **not** appear in `build.yml`:
 
 ```
 check-initialization
@@ -431,23 +444,61 @@ check-initialization
         ▼
 check-repo-state
         │
+        ├──────────────────────────────┐
+        ▼                              ▼
+   java-build                    code-validation (existing — runs in parallel,
+        │                                          independent of deploy chain)
         ▼
-   java-build          (existing — modified to use -P partition-azure)
+   docker-build        (NEW — gated by §5.5 trust rules)
         │
         ▼
-   docker-build        (NEW)
+     deploy            (NEW — per-service concurrency, Flux pre-check)
         │
         ▼
-     deploy            (NEW)
-        │
-        ▼
-integration-test       (NEW)
-        │
-        ▼
-  code-validation      (existing)
+integration-test       (NEW — digest verification, cross-service health probe)
 ```
 
-Note: `code-validation` runs in parallel with the new jobs in the existing structure. We can keep it parallel — it doesn't depend on deploy.
+`code-validation` (commit linting, branch checks) is unchanged and parallel — it does not depend on the deploy chain.
+
+### 5.5 Workflow trust boundaries
+
+The new jobs hold a federated identity with `Azure Kubernetes Service Cluster User Role` + namespace `edit` + `Key Vault Secrets User`. Running them on attacker-controlled code is a path to cluster-wide compromise across all 8 forks. The trust model:
+
+| Event | Code source | Secret access | Deploy stages run? |
+|---|---|---|---|
+| `push` to `main` / `fork_integration` / `fork_upstream` | Repo HEAD (post-merge) | Yes | **Yes** |
+| `pull_request` from internal branch (head repo == base repo) | PR HEAD | Yes | **Yes** |
+| `pull_request` from external fork | PR HEAD | No (GH default) | No — would fail at `azure/login` anyway, but explicitly skipped to avoid noise |
+| `pull_request_target` (base-repo context) | PR HEAD (checked out via explicit ref) | Yes | **No** — too dangerous; would let a PR exfiltrate the federated identity by running arbitrary code in a workflow that has secret access |
+| `dependabot[bot]` PR | PR HEAD | Limited (`secrets.DEPENDABOT_SECRETS`) | No — dependabot-validation.yml is the dependency-update path |
+| `workflow_dispatch` | Repo HEAD at chosen ref | Yes | Yes (manual gate is the operator) |
+| Tag push (release-please) | Tagged commit (already in `main`) | Yes | Yes — federated credential subject must include `refs/tags/v*` |
+| Cascade workflow push to `fork_integration` | Cascade-resolved tree | Yes | Yes — see §5.6 |
+
+**Gating clause used by docker-build / deploy / integration-test jobs:**
+
+```yaml
+if: |
+  needs.check-initialization.outputs.initialized == 'true' &&
+  needs.check-repo-state.outputs.is_java_repo == 'true' &&
+  needs.java-build.outputs.build_result == 'success' &&
+  github.actor != 'dependabot[bot]' &&
+  github.event_name != 'pull_request_target' &&
+  (github.event_name != 'pull_request' ||
+   github.event.pull_request.head.repo.full_name == github.repository)
+```
+
+For external-fork PRs we accept the reduced safety net: maintainers must do the historical "checkout, build, sanity-test locally" before merge. Documented in CONTRIBUTING.
+
+### 5.6 Cascade workflow interaction
+
+`cascade.yml` pushes upstream changes through `fork_upstream` → `fork_integration` → `main`. Each push to a protected branch triggers `validate.yml` (push trigger). Under D15, **cascade-driven pushes do trigger the new deploy stages** — catching upstream regressions before they reach `main` is exactly the signal this design is meant to provide.
+
+Implications:
+
+- Cascade runs are bot-driven, but the bot identity (`github-actions[bot]`) does have access to the federated identity. The gating clause in §5.5 admits cascade pushes because they are `push` events to protected branches, not PRs.
+- If a cascade push deploys a broken upstream change and integration tests fail, the cascade PR (cascade also opens a PR on `main` after `fork_integration`) is held back by required-check failure — the desired behaviour.
+- Cascade concurrency: cascade itself has its own concurrency lock; combined with our per-service deploy concurrency, two cascades for the same service serialize correctly.
 
 ---
 
@@ -455,7 +506,16 @@ Note: `code-validation` runs in parallel with the new jobs in the existing struc
 
 ### 6.1 Federated Identity Setup (per service fork)
 
-For each service fork (one-time setup, automated via script):
+For each service fork (one-time setup, automated via script — see §9.4).
+
+**Operator preconditions** (verified by the onboarding script before any change is attempted):
+
+- `az` CLI logged into the target tenant with `Owner` or `User Access Administrator` on the identities resource group + the AKS resource (to create managed identities and role assignments)
+- `kubectl` configured against the target AKS cluster with `cluster-admin` (to create RoleBindings)
+- `gh` CLI authenticated against the target org with admin on the target repo (SSO-authorized) — to write secrets/variables/rulesets
+- The target fork's `Deployment/<name>` actually exists in the `osdu` namespace (script does `kubectl get -n osdu deployment/<name>` and fails if absent — this is C3's tie-in)
+
+Steps:
 
 1. **Create User-Assigned Managed Identity:**
    ```
@@ -465,17 +525,26 @@ For each service fork (one-time setup, automated via script):
      --location "${LOCATION}"
    ```
 
-2. **Add federated credential for GitHub Actions:**
+2. **Add federated credentials for GitHub Actions** — every event that needs Azure auth needs a subject. Use wildcard subjects where the GitHub federated-credential editor accepts them, otherwise enumerate:
+
+   | Trigger | Federated-credential subject |
+   |---|---|
+   | Push to / PR to any branch | `repo:${ORG}/${SERVICE}:ref:refs/heads/*` (wildcard) |
+   | Pull request events | `repo:${ORG}/${SERVICE}:pull_request` |
+   | Release-please tag push (`v*`) | `repo:${ORG}/${SERVICE}:ref:refs/tags/*` |
+   | Environment-scoped (if `environments:` used for gating) | `repo:${ORG}/${SERVICE}:environment:<env-name>` |
+
+   Wildcard subjects require Azure AD to be configured to accept the wildcard pattern (controlled by an Entra ID feature flag; if unavailable, enumerate explicit refs `main`, `fork_integration`, `fork_upstream`).
    ```
    az identity federated-credential create \
-     --name "github-actions-${SERVICE}" \
+     --name "github-actions-${SERVICE}-branches" \
      --identity-name "spi-ci-${SERVICE}" \
      --resource-group "${RG_IDENTITIES}" \
      --issuer "https://token.actions.githubusercontent.com" \
-     --subject "repo:${ORG}/${SERVICE}:ref:refs/heads/main" \
+     --subject "repo:${ORG}/${SERVICE}:ref:refs/heads/*" \
      --audience "api://AzureADTokenExchange"
    ```
-   Repeat with `:ref:refs/heads/fork_integration`, `:ref:refs/heads/fork_upstream`, and `:pull_request` subjects.
+   …repeat for PR and tag subjects.
 
 3. **AKS RBAC:**
    ```
@@ -486,11 +555,19 @@ For each service fork (one-time setup, automated via script):
      --scope "/subscriptions/.../managedClusters/${AKS_NAME}"
 
    # Namespace-level: edit on osdu namespace (via K8s RoleBinding)
-   kubectl create rolebinding "spi-ci-${SERVICE}" \
-     --namespace osdu \
-     --clusterrole edit \
-     --user "${IDENTITY_OBJECT_ID}"
    ```
+   **The exact `kubectl create rolebinding` subject form depends on the AKS cluster's auth mode.** Phase 0 must verify which of these works on the spi-stack cluster:
+   - **AKS-managed Entra ID (recommended):** subject is the identity's principal/object ID, treated as a User
+     ```
+     kubectl create rolebinding "spi-ci-${SERVICE}" \
+       --namespace osdu \
+       --clusterrole edit \
+       --user "${IDENTITY_PRINCIPAL_OID}"
+     ```
+   - **Local accounts disabled (most secure):** must use a `RoleBinding` manifest referencing `kind: User` with the principal OID and explicit `apiGroup: rbac.authorization.k8s.io`
+   - **Workload Identity SA passthrough:** bind to a `ServiceAccount` resource that the workload identity maps to (different model — only relevant if we want CI to use a pre-existing SA rather than its own identity)
+
+   `kubectl auth can-i patch deployments -n osdu --as=<principal-oid>` is the Phase 0 acceptance check for whichever form is used.
 
 4. **Key Vault access:**
    ```
@@ -499,12 +576,14 @@ For each service fork (one-time setup, automated via script):
      --role "Key Vault Secrets User" \
      --scope "${KV_RESOURCE_ID}"
    ```
+   For tighter scoping, restrict to specific secret prefixes (e.g., `${SERVICE}-*`) using KV access policies once the per-service secret naming convention is captured in Phase 0.
 
 5. **GitHub repo configuration:**
-   - Add **secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
-   - Add **variables:** `AKS_RESOURCE_GROUP`, `AKS_CLUSTER_NAME`, `KEYVAULT_NAME`, `GATEWAY_URL`, `SERVICE_NAME`, `K8S_NAMESPACE`
+   - **Secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
+   - **Per-service repo variables:** `AZURE_CLIENT_ID` (also as var for use in `if:` expressions), `SERVICE_NAME`, `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `MAVEN_PROFILE` (e.g. `partition-azure`)
+   - **Org-level variables (set once, inherited):** `AKS_RESOURCE_GROUP`, `AKS_CLUSTER_NAME`, `K8S_NAMESPACE` (= `osdu`), `KEYVAULT_NAME`, `GATEWAY_URL`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
 
-This is roughly ~20 steps per service. Automation is essential — see Section 7.
+This is roughly ~20 steps per service. Automation is essential — see §9.4.
 
 ### 6.2 GitHub Actions OIDC integration
 
@@ -528,8 +607,10 @@ Requires `permissions: id-token: write` at job or workflow level.
 | `GITHUB_TOKEN` | `id-token: write` | Workflow run | Mint OIDC token for Azure login |
 | Managed Identity | AKS Cluster User | AKS resource | Get kubeconfig |
 | Managed Identity | K8s `edit` role | `osdu` namespace | Patch deployments |
-| Managed Identity | Key Vault Secrets User | Shared KV | Read acceptance test secrets |
-| AKS kubelet identity | AcrPull | (Not needed — GHCR is public) | N/A |
+| Managed Identity | Key Vault Secrets User | Shared KV (scoped per-service if possible) | Read acceptance test secrets |
+| AKS kubelet identity | AcrPull | (Not needed — GHCR is public per D4) | N/A unless §7.4 fallback to ACR is activated |
+
+The federated identity has **no** write access to: cluster-scoped resources, the `osdu-spi-stack` repo, the engineering-template repo, KV management plane, or any tenant-wide resources. Compromise of one fork's identity does not propagate beyond its own service's namespace footprint.
 
 ---
 
@@ -543,6 +624,17 @@ Requires `permissions: id-token: write` at job or workflow level.
 - Istio Gateway exposing `/api/partition/v1/*` etc.
 - Key Vault with workload identity secrets
 - Workload Identity Service Account (`workload-identity-sa`) in osdu namespace
+
+**Deployment-name contract** (foundational to the `kubectl set image` model — verify before Phase 0):
+
+The generic Helm chart `software/charts/osdu-spi-service/` materializes one `Deployment` per service. **The exact resource name and container name as rendered into the cluster** are the values used in `K8S_DEPLOYMENT_NAME` / `K8S_CONTAINER_NAME` (D13). For each service fork during onboarding, the script captures these via:
+
+```
+kubectl get deployment -n osdu -l app.kubernetes.io/component=${SERVICE} -o jsonpath='{.items[0].metadata.name}'
+kubectl get deployment -n osdu <NAME> -o jsonpath='{.spec.template.spec.containers[0].name}'
+```
+
+If the chart names resources unpredictably (e.g., includes a release-name prefix), the stack repo must be updated to expose stable names — a coordinated change with `osdu-spi-stack` owners.
 
 ### 7.2 What must be added/changed
 
@@ -579,37 +671,69 @@ A few values are shared across all forks and should be exposed as **organization
 | `AZURE_TENANT_ID` | `<tenant-guid>` | Shared tenant |
 | `AZURE_SUBSCRIPTION_ID` | `<sub-guid>` | Shared subscription |
 
-Per-fork variables (must be set per repo):
+Per-fork variables (must be set per repo by the onboarding script):
 
-| Variable | Value (per fork) |
-|----------|------------------|
-| `AZURE_CLIENT_ID` | The managed identity's client ID — unique per fork |
-| `SERVICE_NAME` | `partition`, `entitlements`, etc. |
+| Variable | Value (per fork) | Why per-fork |
+|----------|------------------|---------------|
+| `AZURE_CLIENT_ID` | The managed identity's client ID — unique per fork | One identity per service for blast-radius isolation (ADR-034) |
+| `SERVICE_NAME` | `partition`, `entitlements`, etc. | Identifies the service in workflow ergonomics; **not** authoritative for cluster resources |
+| `K8S_DEPLOYMENT_NAME` | Actual chart-rendered Deployment name | Insulate CI from chart naming changes (D13) |
+| `K8S_CONTAINER_NAME` | Actual container name inside the Deployment | Same — chart may use `app` or `service` rather than service slug |
+| `MAVEN_PROFILE` | `partition-azure`, `entitlements-azure`, etc. | Profile naming differs across services (Q5) |
+| `ACCEPTANCE_TEST_DIR` | `partition-acceptance-test` | Verified per-service during Phase 5; default is `<service>-acceptance-test` |
+| `ACCEPTANCE_TEST_SECRET_MAP` | JSON, e.g. `{"PARTITION_BASE_URL":"partition-base-url","INTEGRATION_TESTER":"int-tester-id",…}` | Each service's acceptance tests read a different set of env vars; map declares the env→KV-secret binding |
 
 ### 7.4 Image-pull from GHCR
 
 Because GHCR packages are public (D4), AKS pulls without authentication. **No image pull secret required.**
 
-If at any point a service's GHCR package gets accidentally made private, AKS pulls will fail with `ErrImagePull`. Add a CI step that verifies package visibility:
+**Compliance precondition (resolve before Phase 4):** confirm that public-visibility container packages are acceptable under the publishing org's GitHub container policy. For the sandbox org (`danielscholl-osdu`) this is operator-controlled and fine. For `Azure/osdu-spi`-derived production forks this requires explicit sign-off — Azure org may have a policy disallowing public packages on first-party repos.
+
+If a CI step accidentally bakes a secret into a layer (e.g., an `ARG` exposed via `RUN curl -H "Authorization: Bearer …"`), it would become publicly downloadable. The Dockerfile in each service repo must be auditable for this and the CI step should verify there are no `RUN` lines that consume `${{ secrets.* }}` (Dockerfile lint is acceptable here).
+
+If at any point a service's GHCR package gets accidentally made private, AKS pulls will fail with `ErrImagePull`. The first push creates a package as **private by default**, so the onboarding script (Phase 3) explicitly flips visibility to public on first run, and a CI step continuously verifies it:
 
 ```bash
 gh api "/users/${ORG}/packages/container/${SERVICE}/visibility" \
   --jq '.visibility' | grep -q 'public'
 ```
 
+**Fallback if public GHCR is disallowed:**
+
+| Option | Mechanism | Trade-off |
+|---|---|---|
+| **A. ACR + AcrPull on kubelet** | Push to existing `osdu-spi-stack` ACR; AKS kubelet identity already has AcrPull via stack provisioning | Best fit if Azure org policy forbids public images; requires push-to-ACR federated identity instead of `GITHUB_TOKEN`; cross-cloud auth wiring |
+| **B. Private GHCR + per-fork image-pull-secret** | Keep GHCR but provision `regcred` Secret in `osdu` namespace per service | Adds onboarding step; brings back the very thing D4 wanted to avoid; secret rotation becomes an operational concern |
+
+Decision deferred until Azure org policy is confirmed (Phase 0 compliance check).
+
 ### 7.5 Cluster CI-mode invariants
 
-When the cluster is "in CI mode":
+The cluster is **permanently in CI mode as steady state** (C4). "CI mode" is not a transient toggle — there is no per-service or per-PR switch to flip it on and off. Resuming Flux is a planned-outage operation, not a routine action.
+
+When the cluster is in CI mode (its normal state):
 - All Flux Kustomizations are suspended
 - All HelmReleases are technically still "managed" but Flux is not reconciling
-- Deployments live in their last-known state from Flux's last reconciliation
+- Deployments live in their last-known state from Flux's last reconciliation, with images progressively replaced by `kubectl set image` from CI
 - CI workflows can `kubectl set image` freely
-- `helm` and `flux` CLI users should be aware not to manually reconcile
+- `helm` and `flux` CLI users must not manually reconcile or resume
 
-To leave CI mode (e.g., for a baseline refresh):
-1. Optionally reset images to their HelmRelease-declared values
-2. `flux resume kustomization --all -n flux-system`
-3. Flux reconciles, services revert to community images (or whatever the HelmRelease points at)
+**Baseline refresh procedure** (planned-outage; coordinate across all 8 forks):
+
+1. Announce a CI freeze window in the engineering org (e.g., a pinned issue or org-level workflow that pauses cascade and template-sync).
+2. Verify no in-flight workflow runs are mid-deploy (`gh run list --status in_progress` across forks).
+3. `flux resume kustomization --all -n flux-system` — Flux reconciles, services revert to community images (or whatever the HelmRelease points at).
+4. Wait for reconciliation to converge (`flux get all -n flux-system`).
+5. `flux suspend kustomization --all -n flux-system` — return cluster to CI mode.
+6. Notify the org that CI is unfrozen.
+
+The stack repo should expose this as a single `spi cluster baseline-refresh` subcommand that drives the above, including the announcement plumbing.
+
+**Detection that CI mode has been violated** (defense in depth):
+
+- `aks-deploy` pre-flight check (§5.2) — fails fast at the start of every deploy
+- `integration-test` post-rollout digest check (§5.3) — fails the run if the deployed image was reverted mid-test
+- An optional cluster-wide cron that posts to a Slack/issue channel if any Kustomization shows `spec.suspend != true`
 
 ---
 
@@ -638,15 +762,9 @@ This allows two services to deploy in parallel (different deployments) but two P
 
 ### 8.2 Cluster cleanup / drift
 
-After many CI runs the cluster has drifted from Flux's declared state. To reset:
+After many CI runs the cluster has drifted from Flux's declared state. The reset procedure is the **baseline refresh** documented in §7.5 — it is a planned outage that requires a CI freeze across all 8 forks, not a casual cron.
 
-```
-flux resume kustomization --all -n flux-system
-# wait for reconciliation
-flux suspend kustomization --all -n flux-system
-```
-
-This brings the cluster back to upstream community images. Useful weekly or when chasing strange behavior.
+Frequency depends on how much drift accumulates. Initial target: monthly during the rollout phase, quarterly thereafter unless investigating a specific symptom.
 
 ### 8.3 Test report integration
 
@@ -680,7 +798,19 @@ Per CI run on the cluster:
 
 Expected cost: negligible per run (cluster is already running). The cluster itself (AKS + CosmosDB + Service Bus + Storage) is the cost; CI usage doesn't materially add to it.
 
-GHCR storage: each image ~300MB, retained per tag. With 8 services × ~50 PRs/month × image-per-PR, expect ~120GB/month accumulation. GHCR storage is free for public packages, so no cost concern — but auto-delete old tags via a retention policy to keep the listing manageable.
+**GHCR retention policy** (set per service by onboarding script):
+- `:sha-<short-sha>` — keep for **30 days**. Long enough to debug a regression to a specific commit; short enough to bound growth.
+- `:<branch>-snapshot` — keep last **5** tags per branch. Always shows recent activity per branch without piling up.
+- `:<version>` (release-please semver tags) — **keep indefinitely**. These are the auditable artifacts.
+- `:pr-<n>` — keep last **2** per PR; delete when PR closes. *Optional — only if we tag per-PR explicitly; default is to rely on `:sha-*` for PRs.*
+
+Set via the [container-retention GitHub action](https://github.com/actions/delete-package-versions) or `gh api -X DELETE ...` in a scheduled workflow.
+
+**GHA cache budget:** GHA gives each repo 10 GB of cache. Today each fork uses Maven cache (~1–2 GB). With the new design adding `cache-from: type=gha,mode=max` for Docker buildx layers (often 1–3 GB per service after `mvn install` artifacts get layered), per-fork usage will climb to 3–5 GB. Within budget for a single service, but the engineering-template repo itself running its own self-test workflows in `.github/workflows/` (e.g. `dev-ci.yml`) needs its caching strategy reviewed during Phase 2.
+
+If cache eviction becomes a bottleneck:
+- Switch Docker layer cache to a registry-backed cache (`type=registry,ref=ghcr.io/<org>/<svc>:buildcache`) — no GHA cache pressure
+- Use `cache-from: type=gha,scope=docker-<service>` to scope per service explicitly
 
 ### 8.6 Flaky test handling
 
@@ -706,15 +836,55 @@ Integration tests against a live cluster will flake. Causes:
 
 ### 8.7 Image immutability
 
-`ghcr.io/...:<sha>` is immutable per build — same SHA = same image. `ghcr.io/...:<branch>` is mutable — represents "latest on that branch."
+`ghcr.io/...:sha-<short>` is immutable per build — same SHA = same image. `ghcr.io/...:<branch>-snapshot` is mutable — represents "latest on that branch."
 
-Deploy step should use **sha-tagged image** for reproducibility:
+Deploy step uses the **digest** (output from `docker/build-push-action`), not the tag:
 
 ```bash
-kubectl set image deployment/partition partition=ghcr.io/.../partition@sha256:<digest> -n osdu
+kubectl set image deployment/${K8S_DEPLOYMENT_NAME} ${K8S_CONTAINER_NAME}=ghcr.io/<org>/<svc>@sha256:<digest> -n osdu
 ```
 
-Use the digest, not the tag, for the deploy. The branch tag is for humans browsing GHCR.
+This guarantees the integration-test step can re-verify the running pod's image against the exact digest we set.
+
+### 8.8 Cross-service test data isolation
+
+The shared `osdu` namespace + concurrent CI runs across 8 services means acceptance tests will trip over each other unless they:
+
+- Create test data with a **per-run unique prefix** — e.g., partition tenant IDs derived from `${SHORT_SHA}-${RUN_ID}`, not hard-coded `test-001`
+- Clean up after themselves on success (best-effort on failure — failure cleanup is unreliable, so naming must be unique enough that residue is harmless)
+- Tolerate **other** test data sitting in the cluster (don't assume "no partitions exist except mine")
+
+For services whose acceptance tests don't follow this discipline today, Phase 5 includes a per-service audit. If a service's tests cannot be made isolation-safe, fall back to an exclusive cluster-wide concurrency lock for that service's runs (downgrade from per-service to cluster-wide for that one service).
+
+Per-service status — to be filled in during Phase 0/Phase 5 audit:
+
+| Service | Test data isolation strategy | Status |
+|---|---|---|
+| partition | TBD | Audit in Phase 0 |
+| entitlements | TBD | Audit in Phase 5 |
+| legal | TBD | Audit in Phase 5 |
+| schema | TBD | Audit in Phase 5 |
+| storage | TBD | Audit in Phase 5 |
+| file | TBD | Audit in Phase 5 |
+| indexer | TBD | Audit in Phase 5 |
+| search | TBD | Audit in Phase 5 |
+
+### 8.9 Cross-service contamination from broken deploys
+
+NG5 ("CI cluster is allowed to remain in a broken state between runs; next run overwrites") interacts poorly with cross-service test dependencies. Concrete scenario:
+
+1. PR-A on `partition` deploys a buggy image. Partition pod is `CrashLoopBackOff`.
+2. PR-B on `entitlements` opens 10 minutes later. Entitlements acceptance tests need to call `/api/partition/v1/partitions` to bootstrap.
+3. Entitlements tests fail with `503 Service Unavailable` from gateway → partition.
+4. PR-B author has no context for why their unrelated change broke CI.
+
+**Mitigations (combined):**
+
+- **Cross-service health probe** (input `cross_service_health: true` on integration-test, §5.3): before running tests, GET `<gateway>/api/<dependency>/v1/info` for each known dependency. Any unhealthy dependency causes the run to emit `test_result: advisory` instead of `fail`, and the workflow surfaces "tests passed but the cluster was contaminated; not authoritative."
+- **Last-known-good image fallback** (Phase 2 W-extension, optional): on integration-test failure, the deploy job records the previous main-SHA image digest. A scheduled or manual `revert-broken-service` workflow can roll affected service back without a human re-running the original PR. Out of scope for v1; flagged for v2.
+- **Dependency graph documentation**: each service's acceptance tests document which other services they call. Phase 5 captures this. Tests that depend on multiple other services are higher contamination risk.
+
+A "service health badge" surfaced on the spi-stack repo README, updated by a 5-minute cron in `osdu-spi-stack`, lets a PR author quickly check "is the cluster healthy right now?" before assuming a test failure is their bug.
 
 ---
 
@@ -724,10 +894,21 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 ### 9.1 Phase 0 — Manual Proof of Concept
 
-**Duration:** 1-3 days  
+**Duration:** 2-4 days (was 1-3; expanded for prerequisite verification)
 **Goal:** Prove the deploy loop works end-to-end before committing to workflow YAML. Surface all auth/networking gotchas in interactive debug, not via 10 GitHub Actions runs.
 
 **Scope:** Use existing `danielscholl-osdu/partition` fork and existing spi-stack cluster. No engineering system changes.
+
+**Step 0 — Prerequisites** (settle before any other Phase 0 step; each is a binary gate):
+
+| # | Check | Why it gates |
+|---|---|---|
+| 0a | Confirm Helm chart materializes `Deployment/<name>` in `osdu` namespace for partition. Capture the exact `metadata.name` and container name. | If the chart names resources unpredictably, `kubectl set image deployment/partition` won't find anything (C5/D13). |
+| 0b | Confirm AKS auth mode (Entra-managed vs. local-accounts-disabled). | Drives the RoleBinding form in §6.1 step 3. |
+| 0c | Confirm Azure org policy permits public GHCR packages for the publishing org. For `danielscholl-osdu` sandbox: OK. For `Azure/osdu-spi`-derived production: get explicit sign-off. | If disallowed, design switches to §7.4 fallback A or B. |
+| 0d | Confirm gateway URL stability — is the DNS owned and stable, or does it change on cluster re-provisioning? | A regenerable gateway URL means every fork's `GATEWAY_URL` var is a moving target. |
+| 0e | Capture partition's acceptance-test data isolation strategy (does it use unique prefixes? clean up?). | Feeds §8.8 audit. If isolation is weak, partition's CI uses cluster-wide concurrency lock instead of per-service. |
+| 0f | Verify operator has the RBAC required by the onboarding script (§6.1 preconditions). | If the operator can't create identities or write secrets to the repo, Phase 3 is blocked. |
 
 **Steps:**
 
@@ -736,132 +917,171 @@ The work is sequenced in five phases, with explicit exit criteria for each.
    cd danielscholl-osdu/partition
    mvn -P partition-azure clean install
    ```
-   Verify: `provider/partition-azure/target/*-spring-boot.jar` exists and is ~50MB.
+   Verify: `provider/partition-azure/target/*-spring-boot.jar` exists and is ~50MB. Capture exact JAR path/filename for the Dockerfile reference.
 
 2. **Containerize:**
    ```
-   docker build -f devops/azure/Dockerfile -t ghcr.io/danielscholl-osdu/partition:test .
-   docker run --rm ghcr.io/danielscholl-osdu/partition:test  # smoke test
+   docker build -f devops/azure/Dockerfile -t ghcr.io/danielscholl-osdu/partition:poc .
+   docker run --rm ghcr.io/danielscholl-osdu/partition:poc  # smoke test (port-forward or healthcheck)
    ```
 
 3. **Push to GHCR:**
    ```
    gh auth token | docker login ghcr.io -u danielscholl-osdu --password-stdin
-   docker push ghcr.io/danielscholl-osdu/partition:test
+   docker push ghcr.io/danielscholl-osdu/partition:poc
    gh api -X PATCH /user/packages/container/partition/visibility -f visibility=public
    ```
 
-4. **Manually provision managed identity** for `danielscholl-osdu/partition` (Section 6.1 steps).
+4. **Manually provision managed identity** for `danielscholl-osdu/partition` per §6.1 steps 1-5. Use the RoleBinding form determined by step 0b.
+
+4a. **Validate the OIDC path end-to-end** (new — was missing from prior plan). Author a minimal `workflow_dispatch` workflow on the partition fork that exercises only `azure/login@v2` + `az aks get-credentials` + `kubectl get deployments -n osdu`:
+   ```yaml
+   - uses: azure/login@v2
+     with:
+       client-id: ${{ secrets.AZURE_CLIENT_ID }}
+       tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+       subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+   - run: az aks get-credentials -g $RG -n $CLUSTER
+   - run: kubectl get deployments -n osdu
+   ```
+   Run from each federated-credential subject we'll need at production: dispatch on `main`, on a feature branch via push, via PR open, and (when release flow lands) on a tag push. Each one that fails surfaces a missing or mismatched federated credential — fix before W2/W3 are written.
 
 5. **Cluster CI-mode:**
    ```
    az aks get-credentials --resource-group <rg> --name <cluster>
-   flux suspend kustomization --all -n flux-system
+   # Verify Flux state — should be suspended by now per §7.5 invariant
+   flux get all -n flux-system
+   # If anything is reconciling, this is a violation of C4/§7.5 — pause and investigate
+   flux suspend kustomization --all -n flux-system  # idempotent
    ```
 
-6. **Deploy via kubectl:**
+6. **Deploy via kubectl** (use the names captured in step 0a):
    ```
-   kubectl set image deployment/partition partition=ghcr.io/danielscholl-osdu/partition:test -n osdu
-   kubectl rollout status deployment/partition -n osdu --timeout=5m
+   kubectl set image deployment/${K8S_DEPLOYMENT_NAME} ${K8S_CONTAINER_NAME}=ghcr.io/danielscholl-osdu/partition:poc -n osdu
+   kubectl rollout status deployment/${K8S_DEPLOYMENT_NAME} -n osdu --timeout=5m
    ```
 
 7. **Acceptance tests:**
    ```
-   # Pull secrets from KV
+   # Pull secrets from KV — capture exact names; this becomes ACCEPTANCE_TEST_SECRET_MAP
    export PARTITION_BASE_URL=https://gateway/api/partition/v1
    export INTEGRATION_TESTER=$(az keyvault secret show ...)
    # ... other env vars
    cd partition-acceptance-test
-   mvn verify
+   time mvn verify   # capture runtime — feeds Q8: is this <10min for per-PR cadence?
    ```
 
 **Exit criteria:**
+- Step 0 prerequisites all answered (one row per gate, written into POC notes)
 - Image is in GHCR, public, pullable
-- Deployment is running the new image (verify via `kubectl describe pod`)
+- Step 4a OIDC validation green on at least: main push, feature-branch push, PR sync (head=base), tag push (use a throwaway tag)
+- Deployment is running the new image (verify `kubectl get deployment -o jsonpath='{.spec.template.spec.containers[0].image}'`)
 - Gateway returns valid responses to partition API endpoints
-- Acceptance tests run to completion (pass or fail is OK — just must run)
+- Acceptance tests run to completion (pass or fail is OK — just must run; runtime captured)
 - All authentication paths exercised and documented
 - All Key Vault secret names captured for later automation
+- Per-service test data isolation strategy captured (gate 0e)
 
-**Output artifact:** A Markdown document in this design directory (`POC-NOTES.md`) capturing every gotcha, every command actually used, every error encountered.
+**Output artifact:** A Markdown document committed to the design directory at `doc/product/cicd-poc-notes.md` capturing every gotcha, every command actually used, every error encountered. **Do not capture secret values** — only secret names, KV references, and resource IDs. The file is checked into a public repo.
 
 ### 9.2 Phase 1 — Sandbox Engineering System Setup
 
-**Duration:** 0.5-1 day  
+**Duration:** 0.5-1 day
+**Status:** Largely complete; one verification step outstanding.
+
 **Goal:** Establish the safe iteration environment.
 
 **Steps:**
 
-1. **Fork `Azure/osdu-spi`** to `danielscholl-osdu/osdu-spi`. Use GitHub UI (Forks default to private — make it public to mirror official).
+1. ✅ **Fork `Azure/osdu-spi`** to `danielscholl-osdu/osdu-spi`.
 
-2. **Reconfigure `danielscholl-osdu/partition` template sync** to pull from sandbox instead of `Azure/osdu-spi`. This is a config change in the fork — likely a repo variable referencing the upstream template URL. Refer to ADR-012 / `template-sync.yml` for the exact mechanism.
+2. ✅ **Reconfigure `danielscholl-osdu/partition` template sync** to pull from sandbox instead of `Azure/osdu-spi`. Per ADR-012 / `template-sync.yml`, this is the `TEMPLATE_REPO_URL` repo variable on partition.
 
-3. **Verify template-sync from sandbox reaches partition:** make a trivial change in sandbox (`README.md` whitespace), wait for next template-sync run on partition, confirm PR opens.
+3. **Pending — verify template-sync round-trip works** (sandbox → partition PR): make a trivial change in sandbox (e.g., comment update in a template-workflow), trigger the daily `sync.yml` on partition manually via `workflow_dispatch`, confirm a PR opens against `fork_upstream`. This must work before Phase 2 begins, because Phase 2's iteration model assumes "edit sandbox → see change applied to partition" works.
 
 **Exit criteria:**
-- Sandbox repo exists and tracks Azure/osdu-spi as upstream
-- Partition fork pulls templates from sandbox
-- Round-trip update (sandbox → partition) works via template-sync
+- Sandbox repo exists and tracks Azure/osdu-spi as upstream ✅
+- Partition fork pulls templates from sandbox ✅
+- Round-trip update (sandbox → partition) works via template-sync ⏳ (gate to Phase 2)
 
 ### 9.3 Phase 2 — Workflow Implementation in Sandbox
 
-**Duration:** 1-2 weeks  
+**Duration:** 1-2 weeks
 **Goal:** Build the new workflow stages in the sandbox engineering system. Iterate until end-to-end green on `danielscholl-osdu/partition`.
 
 **Work items (each is one or more PRs in sandbox):**
 
 | # | Work item | Component |
 |---|-----------|-----------|
-| W1 | Restrict java-build to `-P partition-azure` | Modify `.github/actions/java-build/action.yml` to accept `maven_profile` input |
-| W2 | New composite action `docker-build` | `.github/actions/docker-build/action.yml` |
-| W3 | New composite action `aks-deploy` | `.github/actions/aks-deploy/action.yml` |
-| W4 | New composite action `integration-test` | `.github/actions/integration-test/action.yml` |
-| W5 | Wire new jobs into `template-workflows/build.yml` | Append jobs after `java-build` |
-| W6 | Wire new jobs into `template-workflows/validate.yml` | Same |
-| W7 | Update `template-workflows/release.yml` to tag images with release version | Optional but recommended |
-| W8 | Add cluster-health-check pre-flight | `.github/actions/cluster-health-check/` |
-| W9 | Add Flux-suspend assertion in deploy action | Inside `aks-deploy/action.yml` |
+| W1 | Parameterize `java-build` profile | Modify `.github/actions/java-build/action.yml` to accept `maven_profile` input; existing default is "no profile" (`mvn clean install`); new behaviour: when `maven_profile` is set, append `-P <profile>` |
+| W2 | New composite action `docker-build` | `.github/actions/docker-build/action.yml` (digest output, immutable `:sha-*` + mutable `:<branch>-snapshot` tags) |
+| W3 | New composite action `aks-deploy` | `.github/actions/aks-deploy/action.yml` (Flux pre-check, RoleBinding mode-aware kubectl, deploys by digest, emits `deployed_digest` output) |
+| W4 | New composite action `integration-test` | `.github/actions/integration-test/action.yml` (digest verification, cross-service health probe, JUnit upload, retry-on-flake) |
+| W5 | Wire new jobs into `template-workflows/validate.yml` **only** | Per D12. `build.yml` is untouched. New jobs gated by the §5.5 trust clause. |
+| W6 | ~~`build.yml` wiring~~ | **Removed.** Was a duplicate per D12. |
+| W7 | Update `template-workflows/release.yml` to tag images with release version | **Mandatory** (was optional). On release-please tag push, build + tag image as `:<version>`; do not re-deploy from `release.yml` (deploy already happened on merge to main). |
+| W8 | Cluster-health-check pre-flight | `.github/actions/cluster-health-check/` — checks: cluster nodes Ready, gateway responds 2xx, Flux still suspended. Used by `deploy` and optionally as a scheduled health badge. |
+| W9 | Flux-suspend assertion in deploy action | Inside `aks-deploy/action.yml` (pre-check) + `integration-test` post-rollout digest check (§5.3) |
+| W10 | Update branch-protection rulesets to add new required checks | Modify `.github/rulesets/default-branch.json` to require `🐳 Docker Build`, `🚀 Deploy to spi-stack`, `🧪 Integration Tests` on PRs to `main`. Verify init workflow / template-sync propagates the rule update to existing forks. |
+| W11 | Image-retention scheduled workflow | New `.github/template-workflows/ghcr-retention.yml` runs weekly, deletes GHCR tags per §8.5 policy. |
+| W12 | GHCR-visibility verification step | Step inside `docker-build` action that checks the package is public; fails the job (with a clear error pointing at onboarding script) if not. |
 
 **Per work item:** PR in sandbox → template-sync pushes to partition → partition workflow runs → debug → iterate.
 
-**Per work item exit criteria:** corresponding stage runs green on partition for 5 consecutive runs (PR open, push commits, merge).
+**Per work item exit criteria:** corresponding stage runs green on partition for 5 consecutive runs covering varied event types (PR open, PR sync, merge to main, cascade-driven push — not 5 whitespace pushes).
 
 **Phase exit criteria:**
-- Full pipeline green on partition for 10 consecutive runs
-- Manual deploy/test scenarios still work (sandbox didn't break manual workflows)
-- POC-NOTES.md gaps all closed
+- Full pipeline green on partition for **10 substantive runs** covering at least 3 of: (a) PR open with code change, (b) PR sync with subsequent commit, (c) merge to main, (d) cascade-driven push to `fork_integration`, (e) release-please tag push. Whitespace-only pushes do not count.
+- Manual deploy/test scenarios still work (sandbox didn't break manual `kubectl set image` workflows)
+- `doc/product/cicd-poc-notes.md` gaps all closed
+- Required-check enforcement (W10) confirmed in partition repo: a PR with intentionally failing integration test cannot merge to `main`
 
 ### 9.4 Phase 3 — Per-Fork Infrastructure Automation
 
-**Duration:** 2-3 days  
-**Goal:** Make onboarding a new service fork a single-script operation.
+**Duration:** 2-3 days
+**Goal:** Make onboarding a new service fork a single-command operation.
 
-**Deliverable:** A script (likely in `osdu-spi-stack/scripts/` since it's infra-adjacent, or in a new `osdu-spi-onboarding/` repo):
+**Deliverable:** Extend the existing `spi` Python CLI in `osdu-spi-stack` with a new `onboard` subcommand (rather than a standalone bash script — `spi` already has the `az`/`kubectl` plumbing, retry logic, and JSON handling that an idempotent shell script would have to reinvent):
 
 ```
-./scripts/onboard-service.sh \
+uv run spi onboard \
   --service partition \
   --org danielscholl-osdu \
   --aks-cluster aks-spi-stack-ci \
-  --aks-rg spi-stack-ci
+  --aks-rg spi-stack-ci \
+  --identities-rg rg-osdu-spi-ci-identities
 ```
 
-What it does:
-1. Creates managed identity in identities RG
-2. Adds federated credentials for all relevant ref subjects
-3. Assigns AKS Cluster User role to identity
-4. Creates K8s RoleBinding in osdu namespace
-5. Assigns Key Vault Secrets User role
-6. Outputs JSON with `AZURE_CLIENT_ID` and other per-fork values for the operator to paste into GitHub repo settings (or sets them via `gh` if appropriate auth is available)
+What it does, in order (each step is idempotent):
+
+1. **Verify operator preconditions** (per §6.1 preconditions block). Fail fast with a clear remediation message if `az`/`kubectl`/`gh` aren't authenticated with the right roles.
+2. Verify the target fork's `Deployment` exists in `osdu` (gate from §7.1). Capture `K8S_DEPLOYMENT_NAME` and `K8S_CONTAINER_NAME` as outputs.
+3. Create managed identity in identities RG (skip if exists).
+4. Add federated credentials for all relevant ref subjects (wildcard if supported; explicit otherwise). Reconcile if already present.
+5. Assign AKS Cluster User role to identity (skip if assigned).
+6. Create K8s RoleBinding in `osdu` namespace using the auth-mode-appropriate form (§6.1 step 3) — `kubectl apply` of a generated manifest, so reruns are safe.
+7. Assign Key Vault Secrets User role (scoped per-service if KV access policy is in use).
+8. **Flip GHCR package visibility to public** for `ghcr.io/<org>/<service>` (creates the package via a dummy push if it doesn't exist yet, then patches visibility). Set the retention policy per §8.5.
+9. Write GitHub repo secrets (`AZURE_CLIENT_ID`/`AZURE_TENANT_ID`/`AZURE_SUBSCRIPTION_ID`) and per-service variables (everything in §7.3 per-fork table).
+10. **Update branch-protection ruleset** on the target repo to include the new required checks (W10 lands the template; this step pushes the per-repo config).
+11. Output a summary block to stdout: identity object ID, all variables set, KV secret expectations (operator must populate the KV secrets out of band — see §11 Q2).
 
 **Exit criteria:**
-- Re-run onboarding on partition (idempotent) — no errors
-- Run onboarding on a second service (e.g., entitlements) when ready — produces a working CI loop with no manual steps beyond pasting two secret values
+- Re-run onboarding on partition (idempotent) — no errors, no duplicate role assignments, no secret overwrites unless `--force-rewrite-secrets`.
+- Run onboarding on a second service (e.g., entitlements) once Phase 5 starts — produces a working CI loop with no manual steps beyond populating per-service Key Vault secrets.
+- `--dry-run` mode prints the plan without making changes (useful for review).
 
 ### 9.5 Phase 4 — PR Back to Official `Azure/osdu-spi`
 
-**Duration:** 1-2 days  
+**Duration:** 1-2 days
 **Goal:** Land the validated design in the official engineering system.
+
+**Pre-step — re-check ADR numbering:**
+The design proposes ADR-032 through ADR-035 (and ADR-036 for security/trust boundaries — see §12 Appendix B). The latest ADR in `Azure/osdu-spi` at the time of writing this design was 031. Before opening the PR, run:
+```
+ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
+```
+…and renumber the new ADRs if upstream has merged additional ones in the interim.
 
 **Steps:**
 
@@ -871,19 +1091,24 @@ What it does:
    git fetch upstream main
    git diff upstream/main..main -- .github/template-workflows/ .github/actions/
    ```
-   Confirm only the intended changes.
+   Confirm only the intended changes (no stray fork-resource updates leaking in).
 
 2. **Open PR against Azure/osdu-spi** with:
-   - All template-workflow changes
-   - All composite action additions
-   - **New ADRs:** drafts in Section 12 (ADR-032 through ADR-035)
+   - All template-workflow changes (validate.yml additions only, per D12)
+   - All composite action additions (`docker-build`, `aks-deploy`, `integration-test`, `cluster-health-check`)
+   - `java-build` action change (new `maven_profile` input)
+   - Ruleset changes for required-check enforcement (W10)
+   - GHCR retention scheduled workflow (W11)
+   - **New ADRs:** drafts in §12 Appendix B (ADR-032 through ADR-036, renumbered per pre-step if needed)
    - **New product specs:** `docker-build-workflow-spec.md`, `deploy-workflow-spec.md`, `integration-test-workflow-spec.md`
    - Updates to `architecture.md`, `workflow-strategy.md`
+   - This design doc itself (`cicd-build-deploy-test-design.md`) + Phase 0 notes (`cicd-poc-notes.md`, with secret values redacted)
 
 3. **Pre-merge checks:**
-   - All existing service forks are notified (announcement issue or comment)
-   - Operators are aware they'll need to provision managed identity per service before their next PR
-   - Sandbox proof points referenced in PR description
+   - All existing service forks are notified (announcement issue or comment in each, scripted)
+   - Operators are aware they'll need to provision managed identity per service before their next PR (linked: §6.1 + onboarding command)
+   - Sandbox proof points referenced in PR description (link to 10+ green runs)
+   - Compliance sign-off for GHCR-public visibility captured (gate 0c)
 
 4. **Merge sequence:**
    - Merge ADRs first (documentation, no risk)
@@ -894,43 +1119,58 @@ What it does:
 - PR merged
 - Official `Azure/osdu-spi` template-sync run propagates to existing service forks (partition will get the change — should be a no-op since it already has the equivalent from sandbox)
 
+**Sandbox lifecycle after merge:**
+
+The sandbox (`danielscholl-osdu/osdu-spi`) is **kept long-lived** rather than archived, for two reasons:
+1. Future template changes can be developed and validated against `danielscholl-osdu/partition` before PRing back to `Azure/osdu-spi` — the same risk-isolation pattern that this design needed.
+2. The sandbox absorbs upstream changes daily (template-sync from `Azure/osdu-spi`) so it stays current.
+
+`danielscholl-osdu/partition`'s `TEMPLATE_REPO_URL` is **switched back to `Azure/osdu-spi`** after this PR merges. The sandbox keeps tracking upstream but no longer feeds partition. To use the sandbox again later (for another template change), the variable can be re-pointed.
+
 ### 9.6 Phase 5 — Rollout to Remaining Services
 
-**Duration:** 1 day per service, parallelizable  
+**Duration:** 1 day per service, parallelizable
 **Goal:** All 8 services on the new CI loop.
 
-**Order (suggested):**
-1. Partition (done — reference)
-2. Entitlements
-3. Legal
-4. Schema
-5. Storage
-6. File
-7. Indexer
-8. Search
+**Order (by dependency, not alphabet — so each newly-onboarded service has its acceptance-test dependencies already running):**
+
+1. Partition (done — reference; required by all others)
+2. Entitlements (depends on partition)
+3. Legal (depends on partition)
+4. Schema (depends on partition + entitlements)
+5. Storage (depends on partition + legal + schema)
+6. Indexer (depends on storage + search)
+7. Search (depends on storage)
+8. File (depends on storage)
+
+Indexer and Search depend on each other for event-driven indexing — both can deploy independently but acceptance tests for one may need the other running. Onboard search first (lower acceptance-test dependency footprint) then indexer.
 
 Per service:
 - Initialize fork from `Azure/osdu-spi` (existing init workflow, ADR-006)
-- Run onboarding script (Phase 3 deliverable)
+- **Per-service audit** (one-time): capture `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, test data isolation strategy (§8.8). Document in `doc/product/service-onboarding-<service>.md`.
+- Run onboarding command (`spi onboard ...`) — Phase 3 deliverable
+- Populate per-service KV secrets (one-time, manual or via stack provisioning)
 - Verify first CI run on the new fork's main goes green
-- Add per-service acceptance test secrets to shared Key Vault if not already present
+- Update §8.8 isolation status table
 
 **Exit criteria:**
-- All 8 services have green CI loops
+- All 8 services have green CI loops on a representative event (PR open + merge to main)
 - Onboarding script needed no per-service patches (proves generality)
+- §8.8 audit table fully populated
+- Each fork's `Deployment` was found and patched successfully — confirming the chart-name convention holds across services
 
 ### 9.7 Schedule estimate
 
 | Phase | Duration | Cumulative |
 |-------|---------|-----------|
-| Phase 0: Manual POC | 1-3 days | 1-3 d |
-| Phase 1: Sandbox setup | 0.5-1 day | 1.5-4 d |
-| Phase 2: Workflow implementation | 5-10 days | 6-14 d |
-| Phase 3: Onboarding automation | 2-3 days | 8-17 d |
-| Phase 4: PR back to official | 1-2 days | 9-19 d |
-| Phase 5: Per-service rollout | 1 day × 7 services | 16-26 d |
+| Phase 0: Manual POC + step 0 prerequisites + OIDC validation | 2-4 days | 2-4 d |
+| Phase 1: Sandbox setup (mostly done) | 0.25-0.5 day | 2.25-4.5 d |
+| Phase 2: Workflow implementation (12 work items) | 6-12 days | 8.25-16.5 d |
+| Phase 3: Onboarding automation (Python CLI extension) | 2-3 days | 10.25-19.5 d |
+| Phase 4: PR back to official | 1-2 days | 11.25-21.5 d |
+| Phase 5: Per-service rollout | 1 day × 7 services (parallelizable) | 18-28 d |
 
-Roughly **3-5 weeks** end-to-end, with most time in Phase 2 (workflow iteration) and Phase 5 (per-service rollout, parallelizable).
+Roughly **4-6 weeks** end-to-end (expanded from prior estimate). Most slack is in Phase 2 (workflow iteration) and Phase 5 (parallelizable across services with multiple operators).
 
 ---
 
@@ -938,35 +1178,52 @@ Roughly **3-5 weeks** end-to-end, with most time in Phase 2 (workflow iteration)
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|------|-----------|--------|-----------|
-| R1 | Flux is accidentally resumed mid-CI, reverting deployed image | M | H | Pre-flight assertion in deploy action; ops doc clearly marks cluster as "CI mode" |
-| R2 | Cross-service test flakes due to shared namespace | H | M | Per-service concurrency lock first; escalate to cluster-wide if needed |
-| R3 | GHCR package accidentally goes private, AKS pulls fail | L | H | Visibility check in workflow; surface error early |
-| R4 | Federated credential subject claim mismatch (branch ref edge cases) | M | M | Wildcard subject `ref:refs/heads/*` covers all branches; explicit `pull_request` subject for PR events |
-| R5 | Acceptance tests depend on stale data from previous run | M | M | Cluster reset weekly (manual `flux resume` + suspend cycle); tests should be idempotent |
-| R6 | Cluster outage blocks all PR merges | L | H | Make deploy check non-blocking under cluster-down (advisory mode toggleable via repo variable) |
-| R7 | Image build is slow (~5min), drags out PR cycle | M | L | Multi-stage Dockerfile, layer caching, build only Azure profile |
+| R1 | Flux is accidentally resumed mid-CI, reverting deployed image | M | H | Pre-flight assertion in deploy action (§5.2); post-rollout digest verification at start of integration-test (§5.3); §7.5 codifies Flux suspension as permanent invariant, baseline refresh is planned-outage only |
+| R2 | Cross-service test flakes due to shared namespace | H | M | Per-service concurrency lock first; escalate to cluster-wide for services that can't meet §8.8 isolation discipline |
+| R3 | GHCR package accidentally goes private, AKS pulls fail | L | H | W12 in-workflow visibility check; W11 onboarding script sets/restores public |
+| R4 | Federated credential subject claim mismatch (branch ref edge cases, tags) | M | M | Wildcard `refs/heads/*` and `refs/tags/*` subjects; explicit `pull_request` subject; Phase 0 step 4a validates every event type before W3 |
+| R5 | Acceptance tests depend on stale data from previous run | M | M | Per-run unique prefixes (§8.8); planned baseline refresh (§8.2) when drift accumulates; tests should be idempotent |
+| R6 | Cluster outage blocks all PR merges | L | H | Cluster-health-check pre-flight (W8) emits clear "cluster down" error; ops can flip a repo variable to make integration-test advisory during a known outage |
+| R7 | Image build is slow (~5min), drags out PR cycle | M | L | Multi-stage Dockerfile, layer caching (GHA or registry-backed), build only Azure profile |
 | R8 | Eight services × 50 PRs/month = 400 deploys/month, cluster gets noisy | M | L | Acceptable; cluster is non-prod |
-| R9 | Sandbox fork drifts from official, hard to PR back | M | M | Daily sync from official to sandbox; small PRs, not one big bang |
-| R10 | Onboarding script depends on operator having Azure permissions to create identities | H | L | Document required RBAC; could be run from a centralized "ops" identity |
-| R11 | Acceptance test credentials leak via Key Vault misconfig | L | H | KV RBAC scoped per service identity to read-only on specific secret prefixes |
-| R12 | Maven profile name varies across services (`-P partition-azure` vs `-P entitlements-azure`) | H | L | Profile name as composite-action input; per-service repo variable |
+| R9 | Sandbox fork drifts from official, hard to PR back | M | M | Daily sync from official to sandbox; small PRs, not one big bang; sandbox remains long-lived post-Phase-4 (§9.5) |
+| R10 | Onboarding script depends on operator having Azure permissions to create identities | H | L | §6.1 preconditions block; CLI fails fast with remediation message; centralized "ops" identity may be used for batch onboarding |
+| R11 | Acceptance test credentials leak via Key Vault misconfig | L | H | KV RBAC scoped per service identity to read-only on specific secret prefixes; PR template warns against committing KV secret values |
+| R12 | Maven profile name varies across services (`-P partition-azure` vs `-P entitlements-azure`) | H | L | `MAVEN_PROFILE` per-service repo variable; java-build action accepts it as input |
+| **R13** | **`pull_request_target` deploy path executes attacker-controlled PR code with cluster credentials** | **L (today) / M (post-rollout)** | **VH** | **C8/D14 — gating clause in §5.5 excludes `pull_request_target` and `dependabot[bot]` from new jobs entirely; trust-boundary table is authoritative** |
+| **R14** | **Azure org policy forbids public GHCR packages, killing D4 strategy** | **M** | **H** | **Phase 0 gate 0c surfaces this before any workflow YAML is written; §7.4 fallbacks A (ACR + AcrPull) and B (private GHCR + image-pull-secret) documented** |
+| **R15** | **Broken deploy from service A leaves the cluster in a state that fails service B's tests for reasons unrelated to B's PR** | **H** | **M** | **Cross-service health probe in integration-test (§5.3, §8.9); `test_result: advisory` distinguishes contamination from genuine failure; v2 may add last-known-good rollback** |
+| **R16** | **Helm chart names cluster resources unpredictably; `kubectl set image deployment/partition` finds no such resource** | **M** | **VH** | **D13 — `K8S_DEPLOYMENT_NAME`/`K8S_CONTAINER_NAME` as per-service variables captured during onboarding; Phase 0 gate 0a verifies before workflow code is written** |
+| **R17** | **Phase 0 manual proof never exercises the federated identity / OIDC path; surprises only land in Phase 2** | **H (without mitigation)** | **M** | **Phase 0 step 4a — minimal `workflow_dispatch` workflow validates `azure/login@v2` for every subject before W3 begins** |
 
 ---
 
 ## 11. Open Questions
 
-These need answers before Phase 0 / during Phase 0:
+Questions that have been resolved by this design pass are listed with their resolution; remaining open questions are owned by Phase 0.
 
-| # | Question | Owner | When needed |
-|---|----------|-------|-------------|
-| Q1 | What is the gateway URL for the shared spi-stack CI cluster? | User | Phase 0 step 7 |
-| Q2 | What are the exact Key Vault secret names the acceptance tests need? | Discovered in Phase 0 step 7 | Phase 0 |
-| Q3 | Does the existing spi-stack RG have a dedicated identities RG, or do we create one? | User | Phase 0 step 4 |
-| Q4 | Should release-please-tagged images be pushed to a separate "release" registry path or just tagged differently in GHCR? | Design decision | Phase 2 W7 |
-| Q5 | Per-service Maven profile names — is it always `<service>-azure`? Need to confirm for entitlements, legal, schema, etc. | Inspect each fork during Phase 2 | Phase 2 |
-| Q6 | Does the spi-stack `osdu-spi-init` chart provision deployments for SPI services, or only the community.opengroup.org images? Need to confirm a `Deployment/partition` exists for kubectl to patch. | User / inspect cluster | Phase 0 |
-| Q7 | If we want to test rollback scenarios in integration tests, do we need a "previous good image" pointer? | Defer to post-MVP | Phase 5+ |
-| Q8 | Are integration tests fast enough to run on every PR (<10min) or do we need a separate "deep" suite? | Measured in Phase 0 | Phase 2 |
+**Resolved during design refinement:**
+
+| # | Question | Resolution |
+|---|----------|------------|
+| Q4 | Should release-please-tagged images be pushed to a separate "release" registry path or just tagged differently in GHCR? | Same path, additional `:<version>` tag on release-please tag push (D5/D12). `release.yml` only adds the tag — does **not** re-deploy, since deploy already happened on merge-to-main. |
+| Q6 | Does the spi-stack chart provision `Deployment/<service>` resources? | **Promoted to Phase 0 gate 0a — must be verified before any other Phase 0 step.** If chart doesn't materialize Deployments with predictable names, design switches to D13 (per-service `K8S_DEPLOYMENT_NAME` variables); if chart doesn't materialize Deployments at all, design is invalidated and we revisit. |
+| Q7 | If we want to test rollback scenarios in integration tests, do we need a "previous good image" pointer? | Deferred to v2 (post-MVP). Last-known-good fallback is captured in §8.9 as a future enhancement, not in scope for initial rollout. |
+
+**Phase 0 must answer:**
+
+| # | Question | Owner | Phase 0 step |
+|---|----------|-------|--------------|
+| Q1 | What is the gateway URL for the shared spi-stack CI cluster? | User | Step 0d (stability) + step 7 (value) |
+| Q2 | What are the exact Key Vault secret names the acceptance tests need? | Discovered in step 7 | Step 7 |
+| Q3 | Does the existing spi-stack RG have a dedicated identities RG, or do we create one? | User | Step 0f / step 4 |
+| Q5 | Per-service Maven profile names — is it always `<service>-azure`? | Inspect each fork during Phase 5 (partition known: `partition-azure`) | Captured as `MAVEN_PROFILE` repo variable during onboarding |
+| Q8 | Are integration tests fast enough to run on every PR (<10min)? | Measured in Phase 0 step 7 (partition); each service measures during Phase 5 onboarding | Step 7 |
+| **Q9 (new)** | What AKS auth mode is the spi-stack cluster using (Entra-managed, local-accounts-disabled, Workload Identity SA passthrough)? Determines K8s RoleBinding syntax. | User / inspect cluster | Step 0b |
+| **Q10 (new)** | Does the Azure org policy permit public GHCR packages for production publishing? (Sandbox org is fine.) | User / Azure security contact | Step 0c, blocks Phase 4 |
+| **Q11 (new)** | Is the gateway URL stable across cluster re-provisioning, or DNS-regenerated? | User | Step 0d |
+| **Q12 (new)** | Per-service test data isolation — does partition's acceptance-test create uniquely-prefixed data and clean up? | Audit existing partition tests | Step 0e |
+| **Q13 (new)** | Per-service acceptance-test dependency graph — which services' tests call which other services' APIs? | Audit each acceptance-test pom + source | Phase 5 onboarding |
 
 ---
 
@@ -974,7 +1231,7 @@ These need answers before Phase 0 / during Phase 0:
 
 ### Appendix A — Workflow YAML Sketches
 
-**A.1. Modified `template-workflows/validate.yml` (excerpt — new jobs only):**
+**A.1. Modified `template-workflows/validate.yml` (excerpt — new jobs only). Note the `if:` clause on `docker-build` implements the §5.5 trust boundary; downstream jobs inherit by `needs:`.**
 
 ```yaml
   docker-build:
@@ -984,7 +1241,10 @@ These need answers before Phase 0 / during Phase 0:
       needs.check-repo-state.outputs.is_initialized == 'true' &&
       needs.check-repo-state.outputs.is_java_repo == 'true' &&
       needs.java-build.outputs.build_result == 'success' &&
-      github.actor != 'dependabot[bot]'
+      github.actor != 'dependabot[bot]' &&
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1009,6 +1269,7 @@ These need answers before Phase 0 / during Phase 0:
   deploy:
     name: "🚀 Deploy to spi-stack"
     needs: [docker-build]
+    if: needs.docker-build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -1016,9 +1277,12 @@ These need answers before Phase 0 / during Phase 0:
     concurrency:
       group: spi-stack-${{ vars.SERVICE_NAME }}
       cancel-in-progress: false
+    outputs:
+      deployed_digest: ${{ steps.deploy.outputs.deployed_digest }}
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/aks-deploy
+      - id: deploy
+        uses: ./.github/actions/aks-deploy
         with:
           azure_client_id: ${{ secrets.AZURE_CLIENT_ID }}
           azure_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
@@ -1026,12 +1290,14 @@ These need answers before Phase 0 / during Phase 0:
           aks_resource_group: ${{ vars.AKS_RESOURCE_GROUP }}
           aks_cluster_name: ${{ vars.AKS_CLUSTER_NAME }}
           namespace: ${{ vars.K8S_NAMESPACE }}
-          deployment_name: ${{ vars.SERVICE_NAME }}
+          deployment_name: ${{ vars.K8S_DEPLOYMENT_NAME }}
+          container_name: ${{ vars.K8S_CONTAINER_NAME }}
           image_ref: ${{ needs.docker-build.outputs.image_ref }}
 
   integration-test:
     name: "🧪 Integration Tests"
     needs: [deploy]
+    if: needs.deploy.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -1045,10 +1311,13 @@ These need answers before Phase 0 / during Phase 0:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - uses: ./.github/actions/integration-test
         with:
-          test_dir: ${{ vars.SERVICE_NAME }}-acceptance-test
+          test_dir: ${{ vars.ACCEPTANCE_TEST_DIR }}
           gateway_url: ${{ vars.GATEWAY_URL }}
           keyvault_name: ${{ vars.KEYVAULT_NAME }}
           secret_map: ${{ vars.ACCEPTANCE_TEST_SECRET_MAP }}
+          maven_profile: ${{ vars.MAVEN_PROFILE }}
+          expected_digest: ${{ needs.deploy.outputs.deployed_digest }}
+          cross_service_health: 'true'
 ```
 
 **A.2. `docker-build/action.yml` sketch:**
@@ -1083,8 +1352,19 @@ runs:
       run: |
         SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-12)
         IMAGE="${{ inputs.registry }}/${{ inputs.org }}/${{ inputs.image_name }}"
-        echo "tags=${IMAGE}:${SHORT_SHA},${IMAGE}:${GITHUB_REF_NAME//\//-}" >> $GITHUB_OUTPUT
-        echo "image_ref=${IMAGE}:${SHORT_SHA}" >> $GITHUB_OUTPUT
+        # Always tag with immutable sha-* (deploy references this)
+        TAGS="${IMAGE}:sha-${SHORT_SHA}"
+        # On protected-branch push, also tag with <branch>-snapshot (matches Maven revision)
+        if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "branch" ]]; then
+          BRANCH_SLUG="${GITHUB_REF_NAME//\//-}"
+          TAGS="${TAGS},${IMAGE}:${BRANCH_SLUG}-snapshot"
+        fi
+        # On tag push (release-please), also tag with the semver
+        if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+          TAGS="${TAGS},${IMAGE}:${GITHUB_REF_NAME}"
+        fi
+        echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+        echo "image_ref=${IMAGE}:sha-${SHORT_SHA}" >> $GITHUB_OUTPUT
     - uses: docker/setup-buildx-action@v3
     - name: Build & push
       id: push
@@ -1108,10 +1388,14 @@ inputs:
   azure_subscription_id: { required: true }
   aks_resource_group: { required: true }
   aks_cluster_name: { required: true }
-  namespace: { default: 'osdu' }
+  namespace: { required: true }
   deployment_name: { required: true }
+  container_name: { required: true }
   image_ref: { required: true }
   rollout_timeout: { default: '5m' }
+outputs:
+  deployed_digest:
+    value: ${{ steps.verify.outputs.digest }}
 runs:
   using: composite
   steps:
@@ -1126,20 +1410,20 @@ runs:
         az aks get-credentials \
           --resource-group ${{ inputs.aks_resource_group }} \
           --name ${{ inputs.aks_cluster_name }}
-    - name: Assert Flux suspended
+    - name: Assert Flux suspended (pre-flight)
       shell: bash
       run: |
         running=$(kubectl get kustomizations -n flux-system -o json 2>/dev/null | \
           jq -r '.items[] | select(.spec.suspend != true) | .metadata.name')
         if [ -n "$running" ]; then
-          echo "::error::Flux not suspended: $running. Run 'flux suspend kustomization --all -n flux-system'"
+          echo "::error::Flux not suspended: $running. Cluster is not in CI mode. See §7.5."
           exit 1
         fi
     - name: Set image
       shell: bash
       run: |
         kubectl set image deployment/${{ inputs.deployment_name }} \
-          ${{ inputs.deployment_name }}=${{ inputs.image_ref }} \
+          ${{ inputs.container_name }}=${{ inputs.image_ref }} \
           -n ${{ inputs.namespace }}
     - name: Wait for rollout
       shell: bash
@@ -1147,12 +1431,41 @@ runs:
         kubectl rollout status deployment/${{ inputs.deployment_name }} \
           -n ${{ inputs.namespace }} \
           --timeout=${{ inputs.rollout_timeout }}
+    - name: Capture deployed digest
+      id: verify
+      shell: bash
+      run: |
+        # Pull running image reference from the live pod; resolve to digest so downstream
+        # integration-test can verify what we deployed is still what's running.
+        IMAGE_ID=$(kubectl get pods -n ${{ inputs.namespace }} \
+          -l app.kubernetes.io/component=${{ inputs.deployment_name }} \
+          -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="${{ inputs.container_name }}")].imageID}')
+        DIGEST="${IMAGE_ID##*@}"
+        echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+        echo "Deployed digest: ${DIGEST}"
     - name: Pod status on failure
       if: failure()
       shell: bash
       run: |
         kubectl describe deployment/${{ inputs.deployment_name }} -n ${{ inputs.namespace }}
         kubectl logs deployment/${{ inputs.deployment_name }} -n ${{ inputs.namespace }} --tail=200
+```
+
+**A.4. `integration-test/action.yml` digest-verification step (excerpt):**
+
+```yaml
+    - name: Verify deployed digest still running
+      if: inputs.expected_digest != ''
+      shell: bash
+      run: |
+        CURRENT=$(kubectl get pods -n ${{ vars.K8S_NAMESPACE }} \
+          -l app.kubernetes.io/component=${{ vars.K8S_DEPLOYMENT_NAME }} \
+          -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="${{ vars.K8S_CONTAINER_NAME }}")].imageID}')
+        CURRENT_DIGEST="${CURRENT##*@}"
+        if [ "$CURRENT_DIGEST" != "${{ inputs.expected_digest }}" ]; then
+          echo "::error::Pod is running ${CURRENT_DIGEST} but deploy set ${{ inputs.expected_digest }}. Possible Flux resume, pod restart with stale image, or cross-service overwrite."
+          exit 1
+        fi
 ```
 
 ### Appendix B — Draft ADRs
@@ -1185,13 +1498,29 @@ runs:
 > **Decision:** Configure the engineering system's Maven build to use `-P <service>-azure` profile only. Profile name is a per-fork variable.  
 > **Consequences:** (+) Faster builds (~3-5x reduction in modules built). (+) Unit-test results are 100% Azure-relevant. (-) Lose signal on whether upstream changes break other providers — acceptable since SPI doesn't ship those.
 
+**ADR-036: Workflow Trust Boundaries for CI/CD with Cluster Credentials**
+
+> **Status:** Proposed
+> **Context:** The new docker-build/deploy/integration-test jobs hold a federated identity with `Azure Kubernetes Service Cluster User`, namespaced `edit` on the shared `osdu` namespace, and `Key Vault Secrets User`. The default GitHub Actions trigger surface (especially `pull_request_target`, but also dependabot PRs and external-fork PRs) can place attacker-controlled code in a context that has access to repo secrets. Running the new jobs in those contexts would expose the cluster federated identity to attacker code, risking compromise across all 8 forks.
+> **Decision:** The new jobs run only when **all** of the following hold:
+> - Event is `push` to a protected branch, OR `pull_request` from a head repo equal to the base repo, OR `workflow_dispatch`, OR a tag push.
+> - Actor is not `dependabot[bot]` (dependabot-validation.yml is the dependency-update path; dependabot does not need cluster access).
+> - Event is not `pull_request_target`.
+> External-fork PRs lose deploy/test signal — maintainers must validate locally before merge. Cascade-driven pushes to `fork_integration` **do** trigger deploy (treated equivalently to a maintainer push).
+> **Consequences:** (+) Cluster credentials are never exposed to attacker-controlled code. (+) Trust model is explicit and uniformly applied across forks. (-) External contributors get reduced CI signal on their PRs; maintainer must run validation in a trusted context before merge. (-) The `if:` clause is verbose and easy to forget when adding new sensitive jobs — must be enforced via review template.
+
 ### Appendix C — Cluster Setup Checklist
 
-Pre-Phase 0:
+Pre-Phase 0 (gates from §9.1 step 0):
 
 - [ ] Confirm shared spi-stack cluster is running (`uv run spi status`)
-- [ ] Confirm Flux is suspended (`flux get all -n flux-system`)
-- [ ] Confirm `osdu` namespace has deployments for all services (`kubectl get deployments -n osdu`)
+- [ ] Confirm Flux is suspended (`flux get all -n flux-system` — every Kustomization shows `Suspended: True`)
+- [ ] **Gate 0a:** Confirm `osdu` namespace has a `Deployment` per service; capture exact `metadata.name` and container name for partition
+- [ ] **Gate 0b:** Identify AKS auth mode (Entra-managed vs. local-accounts-disabled vs. Workload Identity SA)
+- [ ] **Gate 0c:** Confirm public GHCR packages are allowed under the publishing org's policy (sandbox OK; production needs explicit sign-off pre-Phase-4)
+- [ ] **Gate 0d:** Confirm gateway URL stability (stable DNS or regenerated per cluster?)
+- [ ] **Gate 0e:** Capture partition acceptance-test data isolation strategy (unique prefixes? cleanup?)
+- [ ] **Gate 0f:** Verify operator has the RBAC required by the onboarding script (§6.1 preconditions)
 - [ ] Confirm gateway URL is reachable (`curl https://<gateway>/api/partition/v1/info`)
 - [ ] Identify Key Vault name and confirm RBAC model (`az keyvault list`)
 - [ ] Identify identities RG (create if needed)
@@ -1199,27 +1528,33 @@ Pre-Phase 0:
 
 Pre-Phase 1:
 
-- [ ] Fork osdu-spi to sandbox org
-- [ ] Note current template-sync upstream URL in partition fork
-- [ ] Confirm template-sync workflow is functional in partition
+- [x] Fork osdu-spi to sandbox org
+- [x] Note current template-sync upstream URL in partition fork
+- [ ] Confirm template-sync workflow is functional in partition (sandbox → partition round-trip — see §9.2 step 3, currently the only outstanding Phase 1 item)
 
 Pre-Phase 4:
 
-- [ ] All Phase 2 work items merged to sandbox
-- [ ] Partition CI on sandbox is green for 10+ runs
-- [ ] POC-NOTES.md captures resolutions to every gotcha
-- [ ] Onboarding script tested re-running on partition (idempotent)
+- [ ] All Phase 2 work items (W1–W12) merged to sandbox
+- [ ] Partition CI on sandbox is green for 10+ **substantive** runs (per §9.3 phase exit criteria)
+- [ ] `doc/product/cicd-poc-notes.md` captures resolutions to every gotcha
+- [ ] Onboarding command (`spi onboard`) tested re-running on partition (idempotent)
+- [ ] ADR numbers re-checked vs. upstream `Azure/osdu-spi`
+- [ ] GHCR-public compliance sign-off obtained (Gate 0c)
 
 ### Appendix D — Glossary
 
 - **Engineering system:** `Azure/osdu-spi` — the template repository. Defines workflows, actions, configs that flow to service forks.
 - **Service fork:** A forked OSDU service repo (`danielscholl-osdu/partition`, etc.) that inherits from the engineering system.
-- **Sandbox engineering system:** `danielscholl-osdu/osdu-spi` (proposed) — fork of the official template used for safe iteration.
-- **Stack:** `osdu-spi-stack` — runtime infrastructure repo providing AKS + Flux + Helm chart.
-- **CI cluster:** The single shared AKS instance brought up by `spi up`, kept with Flux suspended for CI/CD use.
+- **Sandbox engineering system:** `danielscholl-osdu/osdu-spi` — fork of the official template used for safe iteration. Kept long-lived after Phase 4 (§9.5).
+- **Stack:** `osdu-spi-stack` — runtime infrastructure repo providing AKS + Flux + Helm chart, plus the `spi` Python CLI.
+- **CI cluster:** The single shared AKS instance brought up by `spi up`. **Permanently in CI mode (Flux suspended) as steady state** (C4 / §7.5).
+- **CI mode:** Cluster state with all Flux Kustomizations suspended. Permanent steady state for this design, not a transient toggle.
+- **Baseline refresh:** Planned-outage operation (§7.5) that temporarily resumes Flux to reset cluster state, then re-suspends. Requires CI freeze across all forks.
 - **Template-sync:** The daily workflow that propagates changes from engineering system to service forks.
-- **Cascade:** The branch-flow process (upstream → fork_upstream → fork_integration → main) for incorporating upstream OSDU changes.
+- **Cascade:** The branch-flow process (upstream → fork_upstream → fork_integration → main) for incorporating upstream OSDU changes. Triggers deploy (D15).
 - **Federated credential:** Azure AD construct allowing a managed identity to be assumed via an OIDC token from GitHub Actions, without storing static secrets.
+- **Trust boundary:** The §5.5 / ADR-036 rule set defining which workflow events are allowed to use the cluster federated identity.
+- **Deployed digest:** The sha256 digest captured from a running pod after `kubectl rollout status` succeeds. Used to verify mid-test that the deployed image is still what's running (§5.3, §8.7).
 
 ---
 
