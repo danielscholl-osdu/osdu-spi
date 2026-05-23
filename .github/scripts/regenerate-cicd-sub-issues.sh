@@ -2,11 +2,19 @@
 # Regenerate the 17 CI/CD sub-issues from doc/product/cicd-implementation-plan.md
 #
 # Usage:
-#   .github/scripts/regenerate-cicd-sub-issues.sh [--repo OWNER/REPO] [--dry-run]
+#   .github/scripts/regenerate-cicd-sub-issues.sh \
+#       [--repo OWNER/REPO] \
+#       [--parent EPIC_ISSUE_NUMBER] \
+#       [--no-link] \
+#       [--dry-run]
 #
 # Defaults to the current repo (per `gh repo view`). On a fresh fork, override
 # with --repo. Existing issues with matching titles are NOT detected; running
 # this twice will create duplicates. Intended for one-shot bootstrap.
+#
+# If --parent is given (default: 1), each created issue is also linked to that
+# parent issue via GitHub's native sub-issues feature (so the parent's sidebar
+# shows the progress bar + auto-checks completion). Pass --no-link to skip.
 #
 # Source of truth for issue bodies: doc/product/cicd-implementation-plan.md
 # This script extracts each `### <Title>` section from "## Sub-issue
@@ -17,12 +25,16 @@ set -euo pipefail
 # ---------- argument parsing -----------------------------------------------
 
 REPO=""
+PARENT=1
+LINK_AS_SUBISSUES=true
 DRY_RUN=false
 PLAN_DOC="doc/product/cicd-implementation-plan.md"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo)    REPO="$2"; shift 2 ;;
+    --parent)  PARENT="$2"; shift 2 ;;
+    --no-link) LINK_AS_SUBISSUES=false; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --plan)    PLAN_DOC="$2"; shift 2 ;;
     --help|-h)
@@ -47,8 +59,25 @@ fi
 
 echo "Repo:    $REPO"
 echo "Plan:    $PLAN_DOC"
+echo "Parent:  #$PARENT (link as sub-issues: $LINK_AS_SUBISSUES)"
 echo "Dry-run: $DRY_RUN"
 echo
+
+# Resolve parent GraphQL node ID once if we'll be linking
+PARENT_NODE_ID=""
+if [[ "$LINK_AS_SUBISSUES" == "true" && "$DRY_RUN" != "true" ]]; then
+  IFS='/' read -r OWNER NAME <<< "$REPO"
+  PARENT_NODE_ID=$(gh api graphql -f query="
+    query {
+      repository(owner: \"$OWNER\", name: \"$NAME\") {
+        issue(number: $PARENT) { id }
+      }
+    }" --jq '.data.repository.issue.id' 2>/dev/null) || true
+  if [[ -z "$PARENT_NODE_ID" || "$PARENT_NODE_ID" == "null" ]]; then
+    echo "Warning: could not resolve parent issue #$PARENT in $REPO. Sub-issue linking will be skipped." >&2
+    LINK_AS_SUBISSUES=false
+  fi
+fi
 
 # ---------- parser ---------------------------------------------------------
 # Each sub-issue section in the plan doc looks like:
@@ -128,6 +157,28 @@ create_one() {
   num=$(basename "$url")
   MAPPING+=("$slot|$num|$title")
   echo "  -> $url"
+
+  # Link as a native sub-issue of the parent epic
+  if [[ "$LINK_AS_SUBISSUES" == "true" ]]; then
+    local child_node_id
+    child_node_id=$(gh api graphql -f query="
+      query {
+        repository(owner: \"$OWNER\", name: \"$NAME\") {
+          issue(number: $num) { id }
+        }
+      }" --jq '.data.repository.issue.id' 2>/dev/null) || true
+    if [[ -n "$child_node_id" && "$child_node_id" != "null" ]]; then
+      gh api graphql -f query="
+        mutation {
+          addSubIssue(input: {
+            issueId: \"$PARENT_NODE_ID\"
+            subIssueId: \"$child_node_id\"
+          }) { subIssue { number } }
+        }" --jq '.data.addSubIssue.subIssue.number' > /dev/null 2>&1 \
+        && echo "     linked as sub-issue of #$PARENT" \
+        || echo "     warn: sub-issue linking failed for #$num"
+    fi
+  fi
 }
 
 # ---------- main loop ------------------------------------------------------
