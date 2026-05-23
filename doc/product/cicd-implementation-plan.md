@@ -130,6 +130,7 @@ The 17 sub-issues as currently filed on this fork (`danielscholl-osdu/osdu-spi`)
 | `ADR-035` | [#16](https://github.com/danielscholl-osdu/osdu-spi/issues/16) | XS | ADR-035: Author 'Azure-Only Maven Profile Restriction' |
 | `ADR-036` | [#17](https://github.com/danielscholl-osdu/osdu-spi/issues/17) | XS | ADR-036: Author 'Workflow Trust Boundaries for CI/CD' |
 | `SPECS` | [#18](https://github.com/danielscholl-osdu/osdu-spi/issues/18) | S | Create docker-build / deploy / integration-test workflow specs |
+| `W13` | [#19](https://github.com/danielscholl-osdu/osdu-spi/issues/19) | XS | W13: Add workflow_dispatch force-full-pipeline path to validate.yml |
 
 ---
 
@@ -211,17 +212,19 @@ Create `.github/actions/aks-deploy/action.yml` per Appendix A.3.
 - `.github/actions/aks-deploy/action.yml` (new)
 
 **Acceptance criteria:**
-- [ ] All inputs per §5.2 contract (`azure_*`, `aks_*`, `namespace`, `deployment_name`, `container_name`, `image_ref`, `rollout_timeout`)
-- [ ] Outputs `deployed_digest` (sha256 from the running pod, not the image we asked to deploy)
+- [ ] All inputs per §5.2 contract: `azure_*`, `aks_*`, `namespace`, `deployment_name`, `container_name`, **`image_repository`**, **`image_digest`** (not `image_ref` — tags are not accepted), `rollout_timeout`
+- [ ] Outputs `previous_digest` (captured before the patch — for the manual `restore-deployment` workflow per §8.9) and `deployed_digest` (read from the live pod after rollout for downstream verification)
+- [ ] `kubectl set image` composes the deploy reference as `${image_repository}@${image_digest}` — by-digest, never by tag
+- [ ] Pod selector is derived from the live deployment (`kubectl get deployment <name> -o ...spec.selector.matchLabels`), NOT a hard-coded `app.kubernetes.io/component` label that could be wrong for chart-prefixed names
 - [ ] Flux-suspend pre-check fails fast if any Kustomization is reconciling (§5.2)
-- [ ] Uses `azure/login@v2`; permissions block declares `id-token: write`
-- [ ] `kubectl set image` correctly references `${container_name}` (not deployment_name twice)
+- [ ] Uses `azure/login@v2`. **Composite actions cannot declare `permissions:` — `id-token: write` must live on the calling workflow job; document this in the action's README/comment so callers know to set it.**
+- [ ] `kubectl set image` correctly references `${container_name}` (not `deployment_name` twice)
 - [ ] Failure path captures `kubectl describe` + tail of logs as an artifact
-- [ ] RoleBinding-form assumption documented as a comment (initial: Entra-managed; Phase 0 gate 0b may change)
+- [ ] **Hard-blocked from merging until Phase 0 gates 0a (Deployment naming) and 0b (AKS auth mode) are closed.** Scaffolding the action with documented assumptions is fine; merging it before the gates close risks burning agent capacity on a revision
 
-**Reference:** Design doc §5.2 + Appendix A.3 + §9.3 W3/W9.
+**Reference:** Design doc §5.2 + Appendix A.3 + §9.3 W3/W9 + §6.1 step 3 (RBAC).
 
-**Out of scope:** Concurrency lock (defined at workflow level in W5). Cluster-health-check (W8).
+**Out of scope:** Concurrency lock (defined at workflow level in W5). Cluster-health-check (W8). RBAC manifest itself (lives in `ONBOARD` script, not in this action).
 
 ---
 
@@ -239,13 +242,16 @@ Create `.github/actions/integration-test/action.yml` per §5.3 contract and Appe
 - `.github/actions/integration-test/action.yml` (new)
 
 **Acceptance criteria:**
-- [ ] All inputs per §5.3 contract (`test_dir`, `gateway_url`, `keyvault_name`, `secret_map`, `maven_goal`, `maven_profile`, `expected_digest`, `cross_service_health`)
-- [ ] Outputs `test_result` (`pass`/`fail`/`advisory`) and `test_report_url`
+- [ ] All inputs per §5.3 contract: `test_dir`, `namespace`, `deployment_name`, `container_name`, `gateway_url`, `keyvault_name`, `secret_map`, `dependencies` (JSON map for cross-service health probe), `maven_goal`, `maven_profile`, `expected_digest`
+- [ ] **Action takes only explicit inputs — never reads `vars.*` or `secrets.*` directly.** Workflow caller wires variables in (encapsulation).
+- [ ] Outputs `test_result` (`pass`/`fail`/`pass-advisory`), `cluster_state` (`healthy`/`contaminated`), and `test_report_url`
 - [ ] Digest-verification step runs at the start, fails with clear message if pod image doesn't match `expected_digest` (§8.9, Appendix A.4)
-- [ ] Cross-service health probe (when enabled) returns `advisory` instead of `fail` if any dependency is unhealthy
-- [ ] Secret retrieval loop reads `secret_map` JSON, populates env vars from KV
+- [ ] Cross-service health probe (when `dependencies` is non-empty) sets `cluster_state=contaminated` if any dependency's `/info` endpoint is non-2xx. **It never changes the job exit code** — exit semantics per §5.3 exit-code table
+- [ ] Secret retrieval uses `::add-mask::` to redact values in logs AND writes to `GITHUB_ENV` via heredoc (multiline-safe), per Appendix A.4 sketch
+- [ ] Pod selector for digest verification is derived from the live deployment's `spec.selector.matchLabels`, NOT a hard-coded label
 - [ ] JUnit XML uploaded as artifact
 - [ ] `nick-fields/retry@v3` wraps acceptance test invocation (max 2 attempts) (§8.6)
+- [ ] **Hard-blocked from merging until Phase 0 gates 0d (gateway URL stability) and 0e (test data isolation) are closed**, plus Phase 0 step 7 has captured the per-service KV secret names
 
 **Reference:** Design doc §5.3 + Appendix A.4 + §8.6 + §8.9.
 
@@ -277,15 +283,18 @@ Downstream jobs (`deploy`, `integration-test`) inherit gating via `needs:`.
 - [ ] Three new jobs (`docker-build`, `deploy`, `integration-test`) appended after `java-build`
 - [ ] `if:` clause on `docker-build` matches §5.5 trust boundary table
 - [ ] `deploy` job uses per-service concurrency group `spi-stack-${{ vars.SERVICE_NAME }}` (per-service, not cluster-wide — §5.2)
-- [ ] `deploy` outputs `deployed_digest`; passed into `integration-test` via `expected_digest`
-- [ ] `integration-test` references `vars.ACCEPTANCE_TEST_DIR`, `vars.K8S_DEPLOYMENT_NAME`, `vars.K8S_CONTAINER_NAME` (not derived from `SERVICE_NAME`)
-- [ ] `permissions:` block includes `id-token: write`, `packages: write`, `contents: read`
+- [ ] `docker-build` outputs `image_repository` + `image_digest`; `deploy` consumes them and composes `${repo}@${digest}` — **deploy is never passed a tag**
+- [ ] `deploy` outputs `previous_digest` (for manual restore per §8.9) and `deployed_digest` (for integration-test verification)
+- [ ] `integration-test` is passed `expected_digest: ${{ needs.deploy.outputs.deployed_digest }}` plus all service-level vars (`vars.ACCEPTANCE_TEST_DIR`, `vars.K8S_DEPLOYMENT_NAME`, `vars.K8S_CONTAINER_NAME`, `vars.ACCEPTANCE_TEST_SECRET_MAP`, `vars.ACCEPTANCE_TEST_DEPENDENCIES`)
+- [ ] **`workflow_dispatch` "force-full-pipeline" input added**, so an operator can manually run the full deploy/test stages on the current HEAD even when the triggering change is paths-ignored (template-sync from sandbox is paths-ignored today; this is the loop's only manual hook — see W13 + §9.3 phase exit criteria)
+- [ ] `permissions:` block includes `id-token: write`, `packages: write`, `contents: read` (these live on the **job**, not inside composite actions)
 - [ ] `code-validation` job remains in parallel (unchanged)
 - [ ] **No changes to `build.yml`**
+- [ ] **Hard-blocked from merging until Phase 0 step 4a (OIDC validation) is green** for at least the four event subjects we care about (main push, feature push, PR sync, tag push). Plus all blocking deps (`W1`, `W2`, `W3`, `W4`) merged.
 
 **Reference:** Design doc §5.4–§5.5 + Appendix A.1.
 
-**Out of scope:** Modifying build.yml. Branch-protection changes (W10).
+**Out of scope:** Modifying build.yml. Branch-protection changes (W10). The W13 `workflow_dispatch` plumbing itself (W5 references it; W13 implements the trigger).
 
 ---
 
@@ -334,10 +343,11 @@ Create `.github/actions/cluster-health-check/action.yml` performing:
 - [ ] Outputs: `status` (`healthy`/`degraded`/`down`) and `summary` for logs
 - [ ] Each check has a distinct error message so the failing component is unambiguous
 - [ ] No hardcoded service names
+- [ ] **Documented precondition:** the calling workflow must have already authenticated to Azure (`azure/login@v2`) and pulled cluster credentials (`az aks get-credentials`) before invoking this action — the action itself does NOT take Azure inputs or run login. Add this as a comment in the action header so callers don't get a confusing `kubectl: cluster unreachable` error.
 
 **Reference:** Design doc §8.4 + §9.3 W8.
 
-**Out of scope:** Using the action (lives in W5 wiring or a future scheduled workflow).
+**Out of scope:** Using the action (lives in W5 wiring or a future scheduled workflow). Re-doing Azure login inside the action (callers always need it for the deploy step too; centralising auth in the action would duplicate work).
 
 ---
 
@@ -607,6 +617,32 @@ Each spec documents: purpose, triggers, inputs, outputs, failure modes, dependen
 **Reference:** Design doc §5 + existing `doc/product/*-workflow-spec.md` files.
 
 **Out of scope:** Updates to `architecture.md` or `workflow-strategy.md`.
+
+---
+
+### W13: Add workflow_dispatch force-full-pipeline path to validate.yml
+
+**Slot:** `W13` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None
+
+**Context:**
+Today `template-workflows/validate.yml` has `paths-ignore` rules that exclude `.github/actions/**` and `.github/template-workflows/**`. That means during Phase 2 iteration, when a template-sync PR brings sandbox workflow/action changes into the partition fork, the validation workflow does NOT run automatically — there's no signal that the new deploy pipeline still works.
+
+**Task:**
+Add a `workflow_dispatch` "force-full-pipeline" input to `.github/template-workflows/validate.yml` so an operator can manually trigger a full validation run on the current HEAD after a template-sync PR merges (or for any reason a paths-ignored change needs verification). This becomes the only manual hook in the sandbox→partition iteration loop documented in §9.3.
+
+**Files:**
+- `.github/template-workflows/validate.yml`
+
+**Acceptance criteria:**
+- [ ] `workflow_dispatch` block adds a new input (e.g. `force_full_pipeline: boolean, default: false`)
+- [ ] The new `docker-build` / `deploy` / `integration-test` jobs' `if:` clauses recognize the input (so they run even when triggered by `workflow_dispatch` regardless of paths-ignored changes)
+- [ ] Existing `workflow_dispatch` inputs (`post_init`, `initialization_complete`) are preserved
+- [ ] README or in-file comment documents that the trigger is "run me after template-sync if you need to verify workflow changes"
+- [ ] No change to push/pull_request trigger behavior
+
+**Reference:** Design doc §9.3 (W13) + current `template-workflows/validate.yml` lines 41-58 (the paths-ignore block).
+
+**Out of scope:** Removing the paths-ignore rules (they exist for good reason — doc-only changes shouldn't fire CI). Changing the trust boundary clauses (those still apply).
 
 ---
 

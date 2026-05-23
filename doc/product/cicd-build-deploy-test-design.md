@@ -118,7 +118,7 @@ Without these signals, the only way to discover deployment regressions is at rel
 - **NG2.** Per-PR ephemeral environments. Cost-prohibitive; deferred.
 - **NG3.** Replacing Flux GitOps for the spi-stack. Flux still owns the initial baseline; CI just patches on top.
 - **NG4.** Building or deploying non-Azure provider profiles. Out of scope for SPI work.
-- **NG5.** Rollback automation. CI cluster is allowed to remain in a broken state between runs; next run overwrites.
+- **NG5.** *Automatic* rollback on test failure. CI cluster is allowed to remain in a broken state between runs; the next CI run for the same service overwrites it. **However**, the deploy step DOES capture the previous-running digest (`previous_digest` output, §5.2), and a manual `restore-deployment` workflow_dispatch action is available so an operator can roll a single service back to its last-known-good digest in seconds without re-running the original PR (§8.9). The line we draw is "no auto-rollback decisions made by CI"; explicit human-triggered restore is in scope.
 
 ---
 
@@ -266,11 +266,12 @@ Three identities total per CI run, all stitched through federated credentials. N
 - `devops/azure/Dockerfile` from service repo
 
 **Outputs:**
-- Image pushed to `ghcr.io/<org>/<service>:sha-<short-sha>` (always — primary, immutable, referenced by deploy)
-- Image pushed to `ghcr.io/<org>/<service>:<branch>-snapshot` on push to a protected branch (mutable, matches Maven `-Drevision=${branch}-SNAPSHOT`)
+- Image pushed to `ghcr.io/<org>/<service>:sha-<short-sha>` (always — for humans browsing GHCR)
+- Image pushed to `ghcr.io/<org>/<service>:<branch>-snapshot` on push to a protected branch (matches Maven `-Drevision=${branch}-SNAPSHOT`)
 - Image pushed to `ghcr.io/<org>/<service>:<version>` on release-please-created tag push (e.g. `:v1.2.3`)
+- Action emits `image_repository` (e.g. `ghcr.io/<org>/<service>`) and `image_digest` (e.g. `sha256:abc123…`) outputs
 
-Deploy step always references the immutable `:sha-<short-sha>` (or its digest); branch/version tags are for humans.
+**Deploy always uses the digest reference `${image_repository}@${image_digest}`, never a tag.** GHCR tags are mutable in principle (a manual re-tag or a follow-up build could move `:sha-<short-sha>` to a different content hash), so passing a tag to `kubectl set image` weakens the guarantee that "what we tested is what runs." Pinning by digest closes that gap. Branch/version tags are documentation, not deployment references.
 
 **Trigger:** Runs in `validate.yml` after `java-build` succeeds. Gated by `C8` — does **not** run for `pull_request_target` from an external head repo, nor for `dependabot[bot]`. See §5.5.
 
@@ -278,7 +279,7 @@ Deploy step always references the immutable `:sha-<short-sha>` (or its digest); 
 
 | Artifact | Type | Location |
 |----------|------|----------|
-| `docker-build` job | Job block | `template-workflows/build.yml` and `template-workflows/validate.yml` (added after `java-build`) |
+| `docker-build` job | Job block | `template-workflows/validate.yml` only — added after `java-build` (per D12, not in `build.yml`) |
 | `docker-build` composite action | Composite action | `.github/actions/docker-build/action.yml` |
 | Dockerfile | Per-service | `devops/azure/Dockerfile` (already in partition fork) |
 
@@ -295,9 +296,12 @@ inputs:
   build_args:             optional
 
 outputs:
-  image_digest:           sha256 digest of pushed image
-  image_tags:             comma-separated tags pushed
+  image_repository:       full repo path (e.g. 'ghcr.io/<org>/<service>')
+  image_digest:           sha256 digest of pushed image (e.g. 'sha256:abc123…')
+  image_tags:             comma-separated tags pushed (for human/log use only)
 ```
+
+Callers MUST compose the deploy reference as `${image_repository}@${image_digest}`; never pass a tag to deploy.
 
 **Failure modes:**
 - Dockerfile missing → job fails with clear message pointing at `devops/azure/Dockerfile`
@@ -324,7 +328,7 @@ outputs:
 
 | Artifact | Type | Location |
 |----------|------|----------|
-| `deploy` job | Job block | `template-workflows/build.yml` and `template-workflows/validate.yml` |
+| `deploy` job | Job block | `template-workflows/validate.yml` only (per D12) |
 | `aks-deploy` composite action | Composite action | `.github/actions/aks-deploy/action.yml` |
 
 **Composite action contract:**
@@ -339,12 +343,14 @@ inputs:
   namespace:              required (from org-level variable, e.g. 'osdu')
   deployment_name:        required (from per-service repo variable K8S_DEPLOYMENT_NAME — NOT derived from SERVICE_NAME, see D13)
   container_name:         required (from per-service repo variable K8S_CONTAINER_NAME — chart may name the container 'app' or similar)
-  image_ref:              required (full image@digest preferred; image:tag accepted)
+  image_repository:       required (e.g. 'ghcr.io/<org>/<service>')
+  image_digest:           required (e.g. 'sha256:abc123…') — action composes the deploy ref as `${image_repository}@${image_digest}`. Tags are not accepted.
   rollout_timeout:        default '5m'
 
 outputs:
   rollout_status:         'success' | 'timeout' | 'failed'
-  deployed_digest:        sha256 digest actually running after rollout (for downstream pin-verification)
+  previous_digest:        sha256 digest that was running BEFORE this deploy (captured pre-patch, used by restore-deployment workflow on failure rollback — see §8.9)
+  deployed_digest:        sha256 digest actually running AFTER rollout (for downstream pin-verification)
   pod_logs_url:           link to GitHub log artifact with pod logs on failure
 ```
 
@@ -398,26 +404,41 @@ Per-service, not cluster-wide. Two different services' deploys can run in parall
 
 | Artifact | Type | Location |
 |----------|------|----------|
-| `integration-test` job | Job block | `template-workflows/build.yml` and `template-workflows/validate.yml` |
+| `integration-test` job | Job block | `template-workflows/validate.yml` only (per D12) |
 | `integration-test` composite action | Composite action | `.github/actions/integration-test/action.yml` |
 
-**Composite action contract:**
+**Composite action contract.** Action takes only explicit inputs; never reads `vars.*` or `secrets.*` directly. Workflow caller wires variables in.
 
 ```
 inputs:
-  test_dir:               required (from per-service repo variable ACCEPTANCE_TEST_DIR; the partition convention is '<service>-acceptance-test' but verify per-service in Phase 5)
-  gateway_url:            required (from org-level variable GATEWAY_URL)
-  keyvault_name:          required (from org-level variable KEYVAULT_NAME)
-  secret_map:             required (from per-service repo variable ACCEPTANCE_TEST_SECRET_MAP — JSON map of env-var-name → kv-secret-name; differs per service)
+  test_dir:               required (caller passes from per-service repo variable ACCEPTANCE_TEST_DIR; partition convention is '<service>-acceptance-test')
+  namespace:              required (caller passes from K8S_NAMESPACE)
+  deployment_name:        required (caller passes from K8S_DEPLOYMENT_NAME)
+  container_name:         required (caller passes from K8S_CONTAINER_NAME)
+  gateway_url:            required (caller passes from GATEWAY_URL)
+  keyvault_name:          required (caller passes from KEYVAULT_NAME)
+  secret_map:             required (JSON map of env-var-name → kv-secret-name; differs per service)
+  dependencies:           optional (JSON map of dependency-service-name → gateway health-endpoint path; e.g. '{"partition":"/api/partition/v1/info"}'. When non-empty, probed at start of run; result drives `cluster_state` output and PR label but never the job exit code)
   maven_goal:             default 'verify'
   maven_profile:          optional (e.g. '<service>-azure')
   expected_digest:        required (sha256 digest from deploy job; integration-test re-reads pod image and fails if mismatched — guards against mid-test Flux resume / pod restart with stale image)
-  cross_service_health:   default 'true' (probe gateway for each dependency service's /info endpoint before running tests; mark advisory if any are unhealthy — see §8.8)
 
 outputs:
-  test_result:            'pass' | 'fail' | 'advisory' (passed locally, but cluster state was unreliable)
+  test_result:            'pass' | 'fail' | 'pass-advisory' (tests passed AND cluster was unhealthy at start — informational only)
   test_report_url:        link to uploaded JUnit XML artifact
+  cluster_state:          'healthy' | 'contaminated' (per cross-service health probe at start of run)
 ```
+
+**Exit-code semantics (required-check compatible).** The job always exits with a binary success/failure code so branch-protection enforcement of G2 is unambiguous:
+
+| Test outcome | Cluster state | Job exit | `test_result` | PR label applied |
+|--------------|---------------|----------|---------------|------------------|
+| Pass | Healthy | success | `pass` | (none) |
+| Pass | Contaminated (a dependency was unhealthy at probe time) | **success** | `pass-advisory` | `ci/cluster-was-contaminated` — reviewers see this and know the pass may not be fully authoritative |
+| Fail | Healthy | failure | `fail` | (none) — your code |
+| Fail | Contaminated | failure | `fail` | `ci/cluster-was-contaminated` — reviewer can decide whether to retry once cluster is clean, but the merge gate is still closed |
+
+The `advisory` concept is **metadata only** (a PR label and a step-summary comment). It never relaxes the required check. If cluster contamination is producing real test failures and you need to merge anyway, that's a break-glass conversation (admin override), not a per-PR variable.
 
 **Secret retrieval:**
 
@@ -476,7 +497,7 @@ The new jobs hold a federated identity with `Azure Kubernetes Service Cluster Us
 | `pull_request_target` (base-repo context) | PR HEAD (checked out via explicit ref) | Yes | **No** — too dangerous; would let a PR exfiltrate the federated identity by running arbitrary code in a workflow that has secret access |
 | `dependabot[bot]` PR | PR HEAD | Limited (`secrets.DEPENDABOT_SECRETS`) | No — dependabot-validation.yml is the dependency-update path |
 | `workflow_dispatch` | Repo HEAD at chosen ref | Yes | Yes (manual gate is the operator) |
-| Tag push (release-please) | Tagged commit (already in `main`) | Yes | Yes — federated credential subject must include `refs/tags/v*` |
+| Tag push (release-please) | Tagged commit (already in `main`) | Yes | **No** — tag pushes go through `release.yml`, NOT `validate.yml`. `release.yml` only re-tags the existing image with the semver (W7); it does not re-deploy, since deploy already ran on the merge-to-main that produced the tagged commit. The federated credential still needs `refs/tags/v*` because `release.yml` authenticates to GHCR for the re-tag. |
 | Cascade workflow push to `fork_integration` | Cascade-resolved tree | Yes | Yes — see §5.6 |
 
 **Gating clause used by docker-build / deploy / integration-test jobs:**
@@ -557,21 +578,68 @@ Steps:
      --assignee "${IDENTITY_PRINCIPAL_ID}" \
      --role "Azure Kubernetes Service Cluster User Role" \
      --scope "/subscriptions/.../managedClusters/${AKS_NAME}"
-
-   # Namespace-level: edit on osdu namespace (via K8s RoleBinding)
    ```
-   **The exact `kubectl create rolebinding` subject form depends on the AKS cluster's auth mode.** Phase 0 must verify which of these works on the spi-stack cluster:
-   - **AKS-managed Entra ID (recommended):** subject is the identity's principal/object ID, treated as a User
-     ```
-     kubectl create rolebinding "spi-ci-${SERVICE}" \
-       --namespace osdu \
-       --clusterrole edit \
-       --user "${IDENTITY_PRINCIPAL_OID}"
-     ```
-   - **Local accounts disabled (most secure):** must use a `RoleBinding` manifest referencing `kind: User` with the principal OID and explicit `apiGroup: rbac.authorization.k8s.io`
-   - **Workload Identity SA passthrough:** bind to a `ServiceAccount` resource that the workload identity maps to (different model — only relevant if we want CI to use a pre-existing SA rather than its own identity)
 
-   `kubectl auth can-i patch deployments -n osdu --as=<principal-oid>` is the Phase 0 acceptance check for whichever form is used.
+   **Namespace-level access uses two least-privilege Roles, NOT the built-in `edit` ClusterRole.** `edit` grants delete/create across most resource kinds in the namespace, which is far more than the CI workflow needs (it only patches one specific Deployment + reads pods/events/logs for diagnostics). Define a custom Role per service and bind only it:
+
+   ```yaml
+   # Role: spi-ci-<service>-deploy  (in namespace osdu)
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: Role
+   metadata:
+     name: spi-ci-${SERVICE}-deploy
+     namespace: osdu
+   rules:
+     # Patch only this one deployment; rollout status reads it
+     - apiGroups: ["apps"]
+       resources: ["deployments"]
+       resourceNames: ["${K8S_DEPLOYMENT_NAME}"]
+       verbs: ["get", "patch"]
+     - apiGroups: ["apps"]
+       resources: ["deployments/scale"]
+       resourceNames: ["${K8S_DEPLOYMENT_NAME}"]
+       verbs: ["get", "patch"]
+     # Diagnostics on any pod in the namespace (needed because the deployment's pods are
+     # the ones being rolled out and we may need to inspect them by selector)
+     - apiGroups: [""]
+       resources: ["pods", "events"]
+       verbs: ["get", "list", "watch"]
+     - apiGroups: [""]
+       resources: ["pods/log"]
+       verbs: ["get", "list"]
+   ---
+   # RoleBinding: bind the above Role to the federated identity (subject form per AKS auth mode)
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: RoleBinding
+   metadata:
+     name: spi-ci-${SERVICE}-deploy
+     namespace: osdu
+   roleRef:
+     apiGroup: rbac.authorization.k8s.io
+     kind: Role
+     name: spi-ci-${SERVICE}-deploy
+   subjects: [...]   # see auth-mode note below
+   ---
+   # Role: spi-ci-flux-read  (in namespace flux-system, read-only)
+   # Needed so the deploy action's "Flux suspended" pre-check can list Kustomizations.
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: Role
+   metadata:
+     name: spi-ci-flux-read
+     namespace: flux-system
+   rules:
+     - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+       resources: ["kustomizations"]
+       verbs: ["get", "list"]
+   # Bound to ALL service-fork identities (one RoleBinding per identity, or one for a Group).
+   ```
+
+   **The RoleBinding subject form depends on the AKS cluster's auth mode** — Phase 0 gate 0b answers which applies:
+   - **AKS-managed Entra ID (recommended):** subject is `kind: User`, `name: <IDENTITY_PRINCIPAL_OID>`, `apiGroup: rbac.authorization.k8s.io`
+   - **Local accounts disabled:** same User form, no fallback
+   - **Workload Identity SA passthrough:** subject is `kind: ServiceAccount` — different model, only chosen if Phase 0 reveals the cluster requires it
+
+   `kubectl auth can-i patch deployments/${K8S_DEPLOYMENT_NAME} -n osdu --as=<principal-oid>` is the Phase 0 acceptance check.
 
 4. **Key Vault access:**
    ```
@@ -610,7 +678,8 @@ Requires `permissions: id-token: write` at job or workflow level.
 | `GITHUB_TOKEN` | `packages: write` | Service repo's GHCR namespace | Push container images |
 | `GITHUB_TOKEN` | `id-token: write` | Workflow run | Mint OIDC token for Azure login |
 | Managed Identity | AKS Cluster User | AKS resource | Get kubeconfig |
-| Managed Identity | K8s `edit` role | `osdu` namespace | Patch deployments |
+| Managed Identity | Custom Role `spi-ci-${SERVICE}-deploy` (patch one named Deployment + read pods/events/logs) | `osdu` namespace | Patch only its own Deployment; diagnose its pods |
+| Managed Identity | Custom Role `spi-ci-flux-read` (get/list Kustomizations) | `flux-system` namespace | Pre-flight check that Flux is suspended |
 | Managed Identity | Key Vault Secrets User | Shared KV (scoped per-service if possible) | Read acceptance test secrets |
 | AKS kubelet identity | AcrPull | (Not needed — GHCR is public per D4) | N/A unless §7.4 fallback to ACR is activated |
 
@@ -686,6 +755,7 @@ Per-fork variables (must be set per repo by the onboarding script):
 | `MAVEN_PROFILE` | `partition-azure`, `entitlements-azure`, etc. | Profile naming differs across services (Q5) |
 | `ACCEPTANCE_TEST_DIR` | `partition-acceptance-test` | Verified per-service during Phase 5; default is `<service>-acceptance-test` |
 | `ACCEPTANCE_TEST_SECRET_MAP` | JSON, e.g. `{"PARTITION_BASE_URL":"partition-base-url","INTEGRATION_TESTER":"int-tester-id",…}` | Each service's acceptance tests read a different set of env vars; map declares the env→KV-secret binding |
+| `ACCEPTANCE_TEST_DEPENDENCIES` | JSON, e.g. `{"partition":"/api/partition/v1/info","legal":"/api/legal/v1/info"}` (empty `{}` for services with no upstream deps) | Per §8.9, integration-test probes each dependency's gateway health endpoint before tests; populates `cluster_state` for PR-label decisions. Audit per-service in Phase 5. |
 
 ### 7.4 Image-pull from GHCR
 
@@ -884,9 +954,15 @@ NG5 ("CI cluster is allowed to remain in a broken state between runs; next run o
 
 **Mitigations (combined):**
 
-- **Cross-service health probe** (input `cross_service_health: true` on integration-test, §5.3): before running tests, GET `<gateway>/api/<dependency>/v1/info` for each known dependency. Any unhealthy dependency causes the run to emit `test_result: advisory` instead of `fail`, and the workflow surfaces "tests passed but the cluster was contaminated; not authoritative."
-- **Last-known-good image fallback** (Phase 2 W-extension, optional): on integration-test failure, the deploy job records the previous main-SHA image digest. A scheduled or manual `revert-broken-service` workflow can roll affected service back without a human re-running the original PR. Out of scope for v1; flagged for v2.
-- **Dependency graph documentation**: each service's acceptance tests document which other services they call. Phase 5 captures this. Tests that depend on multiple other services are higher contamination risk.
+- **Cross-service health probe** (per-service `ACCEPTANCE_TEST_DEPENDENCIES` map declares which dependencies to check, see §5.3 + §7.3): before running tests, GET each dependency's `/info` endpoint. The probe result populates `cluster_state` (`healthy` / `contaminated`) and drives a PR label. **It never changes the job exit code** — required-check semantics (G2) are preserved. See §5.3 exit-code table.
+- **Manual `restore-deployment` workflow** (in scope for v1; modifies NG5): the deploy step captures `previous_digest` before patching. A workflow_dispatch-triggered job lets an operator restore a service to its last-known-good digest:
+  ```
+  gh workflow run restore-deployment.yml \
+    -f service=partition \
+    -f digest=sha256:<previous-good-digest>
+  ```
+  This is for the common case where one bad deploy is poisoning everyone else's tests and you want to unstick the cluster without waiting for the original PR author to push a fix. Not auto-triggered — humans decide when to use it.
+- **Dependency graph documentation**: each service's acceptance tests document which other services they call via the per-service `ACCEPTANCE_TEST_DEPENDENCIES` variable. Phase 5 captures this. Tests that depend on multiple other services are higher contamination risk.
 
 A "service health badge" surfaced on the spi-stack repo README, updated by a 5-minute cron in `osdu-spi-stack`, lets a PR author quickly check "is the cluster healthy right now?" before assuming a test failure is their bug.
 
@@ -905,14 +981,16 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 **Step 0 — Prerequisites** (settle before any other Phase 0 step; each is a binary gate):
 
-| # | Check | Why it gates |
-|---|---|---|
-| 0a | Confirm Helm chart materializes `Deployment/<name>` in `osdu` namespace for partition. Capture the exact `metadata.name` and container name. | If the chart names resources unpredictably, `kubectl set image deployment/partition` won't find anything (C5/D13). |
-| 0b | Confirm AKS auth mode (Entra-managed vs. local-accounts-disabled). | Drives the RoleBinding form in §6.1 step 3. |
-| 0c | Confirm Azure org policy permits public GHCR packages for the publishing org. For `danielscholl-osdu` sandbox: OK. For `Azure/osdu-spi`-derived production: get explicit sign-off. | If disallowed, design switches to §7.4 fallback A or B. |
-| 0d | Confirm gateway URL stability — is the DNS owned and stable, or does it change on cluster re-provisioning? | A regenerable gateway URL means every fork's `GATEWAY_URL` var is a moving target. |
-| 0e | Capture partition's acceptance-test data isolation strategy (does it use unique prefixes? clean up?). | Feeds §8.8 audit. If isolation is weak, partition's CI uses cluster-wide concurrency lock instead of per-service. |
-| 0f | Verify operator has the RBAC required by the onboarding script (§6.1 preconditions). | If the operator can't create identities or write secrets to the repo, Phase 3 is blocked. |
+| # | Check | Why it gates | Blocks |
+|---|---|---|---|
+| 0a | Confirm Helm chart materializes `Deployment/<name>` in `osdu` namespace for partition. Capture the exact `metadata.name` and container name. | If the chart names resources unpredictably, `kubectl set image deployment/partition` won't find anything (C5/D13). | **W3 merge** (action assumes specific naming) |
+| 0b | Confirm AKS auth mode (Entra-managed vs. local-accounts-disabled vs. WI SA). | Drives the RoleBinding form in §6.1 step 3. | **W3 merge** (action's RBAC binding form), **ONBOARD merge** (script's RBAC step) |
+| 0c | Confirm Azure org policy permits public GHCR packages for the publishing org. For `danielscholl-osdu` sandbox: OK. For `Azure/osdu-spi`-derived production: get explicit sign-off. | If disallowed, design switches to §7.4 fallback A or B. | **Phase 4 PR back to upstream** (compliance sign-off required pre-merge) |
+| 0d | Confirm gateway URL stability — is the DNS owned and stable, or does it change on cluster re-provisioning? | A regenerable gateway URL means every fork's `GATEWAY_URL` var is a moving target. | **W4 merge** (integration-test consumes the URL) |
+| 0e | Capture partition's acceptance-test data isolation strategy (does it use unique prefixes? clean up?). | Feeds §8.8 audit. If isolation is weak, partition's CI uses cluster-wide concurrency lock instead of per-service. | **W4 merge** (action's concurrency wiring and `cluster_state` semantics depend on the answer) |
+| 0f | Verify operator has the RBAC required by the onboarding script (§6.1 preconditions). | If the operator can't create identities or write secrets to the repo, Phase 3 is blocked. | **ONBOARD merge** (script's preconditions check is meaningless if there's no test environment) |
+
+**Hard-blocker rule:** Agent-authored work for `W3`, `W4`, `ONBOARD` can be drafted (PR opened) with documented assumptions, but **cannot merge** until the listed gates above are closed. `W5` (wire validate.yml) additionally cannot merge until **Phase 0 step 4a (OIDC validation)** is green on at least the four required event subjects. Reviewing PRs against unsettled gates wastes agent context — revisions for "we picked the wrong assumption" are predictable and avoidable.
 
 **Steps:**
 
@@ -1029,8 +1107,9 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 | W10 | Update branch-protection rulesets to add new required checks | Modify `.github/rulesets/default-branch.json` to require `🐳 Docker Build`, `🚀 Deploy to spi-stack`, `🧪 Integration Tests` on PRs to `main`. Verify init workflow / template-sync propagates the rule update to existing forks. |
 | W11 | Image-retention scheduled workflow | New `.github/template-workflows/ghcr-retention.yml` runs weekly, deletes GHCR tags per §8.5 policy. |
 | W12 | GHCR-visibility verification step | Step inside `docker-build` action that checks the package is public; fails the job (with a clear error pointing at onboarding script) if not. |
+| W13 | Add `workflow_dispatch` "force-full-pipeline" path to validate.yml | Today `validate.yml` `paths-ignore` excludes `.github/actions/**` and `.github/template-workflows/**`. That means template-sync PRs whose ONLY change is workflow/action files **do not trigger validate.yml**, breaking the sandbox→partition iteration loop. Fix: add a `workflow_dispatch` input that forces the new deploy/test stages to run against the current HEAD regardless of paths-ignore, so the operator can manually trigger a verification run after each template-sync. Document the trigger explicitly in W5 acceptance criteria. |
 
-**Per work item:** PR in sandbox → template-sync pushes to partition → partition workflow runs → debug → iterate.
+**Per work item:** PR in sandbox → template-sync pushes to partition → operator manually triggers `validate.yml` via `workflow_dispatch` on partition (because template-sync changes are paths-ignored) → debug → iterate.
 
 **Per work item exit criteria:** corresponding stage runs green on partition for 5 consecutive runs covering varied event types (PR open, PR sync, merge to main, cascade-driven push — not 5 whitespace pushes).
 
@@ -1143,11 +1222,11 @@ The sandbox (`danielscholl-osdu/osdu-spi`) is **kept long-lived** rather than ar
 3. Legal (depends on partition)
 4. Schema (depends on partition + entitlements)
 5. Storage (depends on partition + legal + schema)
-6. Indexer (depends on storage + search)
-7. Search (depends on storage)
+6. Search (depends on storage; lower acceptance-test dependency footprint than indexer)
+7. Indexer (depends on storage + search — onboard *after* search per note below)
 8. File (depends on storage)
 
-Indexer and Search depend on each other for event-driven indexing — both can deploy independently but acceptance tests for one may need the other running. Onboard search first (lower acceptance-test dependency footprint) then indexer.
+Indexer and Search are coupled for event-driven indexing — both can deploy independently but acceptance tests for one may need the other running. Onboard search first so its gateway is healthy by the time indexer's tests run.
 
 Per service:
 - Initialize fork from `Azure/osdu-spi` (existing init workflow, ADR-006)
@@ -1254,8 +1333,8 @@ Questions that have been resolved by this design pass are listed with their reso
       contents: read
       packages: write
     outputs:
+      image_repository: ${{ steps.build.outputs.image_repository }}
       image_digest: ${{ steps.build.outputs.image_digest }}
-      image_ref: ${{ steps.build.outputs.image_ref }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v5
@@ -1282,6 +1361,7 @@ Questions that have been resolved by this design pass are listed with their reso
       group: spi-stack-${{ vars.SERVICE_NAME }}
       cancel-in-progress: false
     outputs:
+      previous_digest: ${{ steps.deploy.outputs.previous_digest }}
       deployed_digest: ${{ steps.deploy.outputs.deployed_digest }}
     steps:
       - uses: actions/checkout@v5
@@ -1296,7 +1376,8 @@ Questions that have been resolved by this design pass are listed with their reso
           namespace: ${{ vars.K8S_NAMESPACE }}
           deployment_name: ${{ vars.K8S_DEPLOYMENT_NAME }}
           container_name: ${{ vars.K8S_CONTAINER_NAME }}
-          image_ref: ${{ needs.docker-build.outputs.image_ref }}
+          image_repository: ${{ needs.docker-build.outputs.image_repository }}
+          image_digest: ${{ needs.docker-build.outputs.image_digest }}
 
   integration-test:
     name: "🧪 Integration Tests"
@@ -1340,10 +1421,10 @@ inputs:
   org:
     default: ${{ github.repository_owner }}
 outputs:
+  image_repository:
+    value: ${{ steps.tag.outputs.image_repository }}
   image_digest:
-    value: ${{ steps.push.outputs.digest }}
-  image_ref:
-    value: ${{ steps.tag.outputs.image_ref }}
+    value: ${{ steps.push.outputs.digest }}   # sha256:... from docker/build-push-action
 runs:
   using: composite
   steps:
@@ -1356,7 +1437,8 @@ runs:
       run: |
         SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-12)
         IMAGE="${{ inputs.registry }}/${{ inputs.org }}/${{ inputs.image_name }}"
-        # Always tag with immutable sha-* (deploy references this)
+        echo "image_repository=${IMAGE}" >> $GITHUB_OUTPUT
+        # Always tag with sha-* (for humans; deploy uses the digest, not this tag)
         TAGS="${IMAGE}:sha-${SHORT_SHA}"
         # On protected-branch push, also tag with <branch>-snapshot (matches Maven revision)
         if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "branch" ]]; then
@@ -1368,7 +1450,6 @@ runs:
           TAGS="${TAGS},${IMAGE}:${GITHUB_REF_NAME}"
         fi
         echo "tags=${TAGS}" >> $GITHUB_OUTPUT
-        echo "image_ref=${IMAGE}:sha-${SHORT_SHA}" >> $GITHUB_OUTPUT
     - uses: docker/setup-buildx-action@v3
     - name: Build & push
       id: push
@@ -1380,6 +1461,8 @@ runs:
         tags: ${{ steps.tag.outputs.tags }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
+    # steps.push.outputs.digest is the canonical immutable identifier callers should use
+    # when composing the deploy reference: ${image_repository}@${image_digest}
 ```
 
 **A.3. `aks-deploy/action.yml` sketch:**
@@ -1395,9 +1478,12 @@ inputs:
   namespace: { required: true }
   deployment_name: { required: true }
   container_name: { required: true }
-  image_ref: { required: true }
-  rollout_timeout: { default: '5m' }
+  image_repository: { required: true }   # e.g. ghcr.io/<org>/<service>
+  image_digest:     { required: true }   # e.g. sha256:abc123...
+  rollout_timeout:  { default: '5m' }
 outputs:
+  previous_digest:
+    value: ${{ steps.capture-previous.outputs.digest }}
   deployed_digest:
     value: ${{ steps.verify.outputs.digest }}
 runs:
@@ -1423,11 +1509,25 @@ runs:
           echo "::error::Flux not suspended: $running. Cluster is not in CI mode. See §7.5."
           exit 1
         fi
-    - name: Set image
+    - name: Capture previous digest (for restore)
+      id: capture-previous
+      shell: bash
+      run: |
+        # Derive pod selector from the deployment itself (don't assume label conventions);
+        # then read the currently running container's imageID -> digest.
+        SELECTOR=$(kubectl get deployment ${{ inputs.deployment_name }} \
+          -n ${{ inputs.namespace }} \
+          -o go-template='{{range $k,$v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}' | sed 's/,$//')
+        IMAGE_ID=$(kubectl get pods -n ${{ inputs.namespace }} -l "$SELECTOR" \
+          -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="${{ inputs.container_name }}")].imageID}' 2>/dev/null || echo "")
+        DIGEST="${IMAGE_ID##*@}"
+        echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+        echo "Previous digest: ${DIGEST:-<unknown>}"
+    - name: Set image (by digest)
       shell: bash
       run: |
         kubectl set image deployment/${{ inputs.deployment_name }} \
-          ${{ inputs.container_name }}=${{ inputs.image_ref }} \
+          ${{ inputs.container_name }}=${{ inputs.image_repository }}@${{ inputs.image_digest }} \
           -n ${{ inputs.namespace }}
     - name: Wait for rollout
       shell: bash
@@ -1439,10 +1539,10 @@ runs:
       id: verify
       shell: bash
       run: |
-        # Pull running image reference from the live pod; resolve to digest so downstream
-        # integration-test can verify what we deployed is still what's running.
-        IMAGE_ID=$(kubectl get pods -n ${{ inputs.namespace }} \
-          -l app.kubernetes.io/component=${{ inputs.deployment_name }} \
+        SELECTOR=$(kubectl get deployment ${{ inputs.deployment_name }} \
+          -n ${{ inputs.namespace }} \
+          -o go-template='{{range $k,$v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}' | sed 's/,$//')
+        IMAGE_ID=$(kubectl get pods -n ${{ inputs.namespace }} -l "$SELECTOR" \
           -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="${{ inputs.container_name }}")].imageID}')
         DIGEST="${IMAGE_ID##*@}"
         echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
@@ -1455,22 +1555,87 @@ runs:
         kubectl logs deployment/${{ inputs.deployment_name }} -n ${{ inputs.namespace }} --tail=200
 ```
 
-**A.4. `integration-test/action.yml` digest-verification step (excerpt):**
+**A.4. `integration-test/action.yml` — selected excerpts.** Note: the action takes **explicit inputs**; it never reads `vars.*` or `secrets.*` directly. All workflow context is passed in at the call site. Pod selectors are derived from the live deployment, not assumed.
+
+```yaml
+# action.yml inputs (excerpt — full contract in §5.3):
+inputs:
+  namespace: { required: true }
+  deployment_name: { required: true }
+  container_name: { required: true }
+  expected_digest: { required: true }
+  dependencies: { required: false }   # JSON: {"partition":"/api/partition/v1/info", ...}
+  gateway_url: { required: true }
+  keyvault_name: { required: true }
+  secret_map: { required: true }      # JSON: {"PARTITION_BASE_URL":"partition-base-url", ...}
+```
 
 ```yaml
     - name: Verify deployed digest still running
-      if: inputs.expected_digest != ''
       shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        DEPLOYMENT: ${{ inputs.deployment_name }}
+        CONTAINER: ${{ inputs.container_name }}
+        EXPECTED: ${{ inputs.expected_digest }}
       run: |
-        CURRENT=$(kubectl get pods -n ${{ vars.K8S_NAMESPACE }} \
-          -l app.kubernetes.io/component=${{ vars.K8S_DEPLOYMENT_NAME }} \
-          -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="${{ vars.K8S_CONTAINER_NAME }}")].imageID}')
+        # Derive the pod selector from the deployment itself (don't assume label conventions)
+        SELECTOR=$(kubectl get deployment "$DEPLOYMENT" -n "$NAMESPACE" \
+          -o go-template='{{range $k,$v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}' | sed 's/,$//')
+        CURRENT=$(kubectl get pods -n "$NAMESPACE" -l "$SELECTOR" \
+          -o jsonpath="{.items[0].status.containerStatuses[?(@.name==\"$CONTAINER\")].imageID}")
         CURRENT_DIGEST="${CURRENT##*@}"
-        if [ "$CURRENT_DIGEST" != "${{ inputs.expected_digest }}" ]; then
-          echo "::error::Pod is running ${CURRENT_DIGEST} but deploy set ${{ inputs.expected_digest }}. Possible Flux resume, pod restart with stale image, or cross-service overwrite."
+        if [ "$CURRENT_DIGEST" != "$EXPECTED" ]; then
+          echo "::error::Pod is running ${CURRENT_DIGEST} but deploy set ${EXPECTED}. Possible Flux resume, pod restart with stale image, or cross-service overwrite."
           exit 1
         fi
 ```
+
+```yaml
+    - name: Cross-service health probe
+      id: health
+      shell: bash
+      env:
+        DEPS: ${{ inputs.dependencies }}
+        GW:   ${{ inputs.gateway_url }}
+      run: |
+        # DEPS is a JSON map of dependency-service-name -> health-endpoint path
+        STATE=healthy
+        if [ -n "$DEPS" ] && [ "$DEPS" != "{}" ]; then
+          for svc in $(jq -r 'keys[]' <<< "$DEPS"); do
+            path=$(jq -r --arg s "$svc" '.[$s]' <<< "$DEPS")
+            code=$(curl -s -o /dev/null -w '%{http_code}' "${GW}${path}" || echo "000")
+            if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+              echo "::warning::Dependency $svc unhealthy at ${GW}${path} (HTTP $code)"
+              STATE=contaminated
+            fi
+          done
+        fi
+        echo "cluster_state=$STATE" >> $GITHUB_OUTPUT
+```
+
+```yaml
+    - name: Load acceptance-test secrets from Key Vault (masked, multiline-safe)
+      shell: bash
+      env:
+        KV: ${{ inputs.keyvault_name }}
+        MAP: ${{ inputs.secret_map }}
+      run: |
+        for env_name in $(jq -r 'keys[]' <<< "$MAP"); do
+          secret_name=$(jq -r --arg k "$env_name" '.[$k]' <<< "$MAP")
+          value=$(az keyvault secret show --vault-name "$KV" --name "$secret_name" --query value -o tsv)
+          # Mask the value in logs BEFORE writing it to GITHUB_ENV
+          echo "::add-mask::$value"
+          # Heredoc form supports multiline secrets safely
+          {
+            printf '%s<<__SECRET_EOF__\n' "$env_name"
+            printf '%s\n' "$value"
+            printf '__SECRET_EOF__\n'
+          } >> "$GITHUB_ENV"
+        done
+```
+
+Note the `cluster_state` output drives a PR label downstream (see §5.3 exit-code table); it does not gate the job's success/failure exit.
 
 ### Appendix B — Draft ADRs
 
