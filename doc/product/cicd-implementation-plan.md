@@ -115,7 +115,7 @@ The 17 sub-issues as currently filed on this fork (`danielscholl-osdu/osdu-spi`)
 | `ADR-034` | [#15](https://github.com/danielscholl-osdu/osdu-spi/issues/15) | ADR-034: Draft 'Federated Identity for Actions to Azure' |
 | `ADR-035` | [#16](https://github.com/danielscholl-osdu/osdu-spi/issues/16) | ADR-035: Draft 'Azure-Only Maven Profile Restriction' |
 | `ADR-036` | [#17](https://github.com/danielscholl-osdu/osdu-spi/issues/17) | ADR-036: Draft 'Workflow Trust Boundaries for CI/CD' |
-| `SPECS` | [#18](https://github.com/danielscholl-osdu/osdu-spi/issues/18) | Drafts: docker-build / deploy / integration-test workflow specs |
+| `SPECS` | [#18](https://github.com/danielscholl-osdu/osdu-spi/issues/18) | Create docker-build / deploy / integration-test workflow specs |
 
 ---
 
@@ -564,7 +564,7 @@ Draft `doc/src/adr/036-workflow-trust-boundaries.md`. Content per Appendix B ADR
 
 ---
 
-### Drafts: docker-build / deploy / integration-test workflow specs
+### Create docker-build / deploy / integration-test workflow specs
 
 **Slot:** `SPECS` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
 
