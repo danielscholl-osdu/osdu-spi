@@ -271,6 +271,8 @@ Three identities total per CI run, all stitched through federated credentials. N
 - Image pushed to `ghcr.io/<org>/<service>:<version>` on release-please-created tag push (e.g. `:v1.2.3`)
 - Action emits `image_repository` (e.g. `ghcr.io/<org>/<service>`) and `image_digest` (e.g. `sha256:abc123…`) outputs
 
+> **Digest format note.** `docker/build-push-action@v6` emits `outputs.digest` with the `sha256:` prefix already included. Callers compose the deploy reference as `${image_repository}@${image_digest}` — **do not** prepend `sha256:` again, or you'll get an invalid `@sha256:sha256:…` reference that `kubectl set image` will accept but the kubelet will fail to pull.
+
 **Deploy always uses the digest reference `${image_repository}@${image_digest}`, never a tag.** GHCR tags are mutable in principle (a manual re-tag or a follow-up build could move `:sha-<short-sha>` to a different content hash), so passing a tag to `kubectl set image` weakens the guarantee that "what we tested is what runs." Pinning by digest closes that gap. Branch/version tags are documentation, not deployment references.
 
 **Trigger:** Runs in `validate.yml` after `java-build` succeeds. Gated by `C8` — does **not** run for `pull_request_target` from an external head repo, nor for `dependabot[bot]`. See §5.5.
@@ -344,7 +346,7 @@ inputs:
   deployment_name:        required (from per-service repo variable K8S_DEPLOYMENT_NAME — NOT derived from SERVICE_NAME, see D13)
   container_name:         required (from per-service repo variable K8S_CONTAINER_NAME — chart may name the container 'app' or similar)
   image_repository:       required (e.g. 'ghcr.io/<org>/<service>')
-  image_digest:           required (e.g. 'sha256:abc123…') — action composes the deploy ref as `${image_repository}@${image_digest}`. Tags are not accepted.
+  image_digest:           required (e.g. 'sha256:abc123…' — the prefix is part of the value, do not strip or double-add). Action composes the deploy ref as `${image_repository}@${image_digest}`. Tags are not accepted.
   rollout_timeout:        default '5m'
 
 outputs:
@@ -590,23 +592,37 @@ Steps:
      name: spi-ci-${SERVICE}-deploy
      namespace: osdu
    rules:
-     # Patch only this one deployment; rollout status reads it
+     # The named deployment: read + watch (rollout status) + patch (set image)
      - apiGroups: ["apps"]
        resources: ["deployments"]
        resourceNames: ["${K8S_DEPLOYMENT_NAME}"]
-       verbs: ["get", "patch"]
+       verbs: ["get", "list", "watch", "patch"]
      - apiGroups: ["apps"]
        resources: ["deployments/scale"]
        resourceNames: ["${K8S_DEPLOYMENT_NAME}"]
        verbs: ["get", "patch"]
-     # Diagnostics on any pod in the namespace (needed because the deployment's pods are
-     # the ones being rolled out and we may need to inspect them by selector)
+     - apiGroups: ["apps"]
+       resources: ["deployments/status"]
+       resourceNames: ["${K8S_DEPLOYMENT_NAME}"]
+       verbs: ["get"]
+     # ReplicaSets: kubectl rollout status walks the deployment → replicaset → pod chain.
+     # ReplicaSet names are dynamic ("<deployment>-<hash>") so resourceNames cannot pin them;
+     # namespace-scoped read is the tightest realistic restriction.
+     - apiGroups: ["apps"]
+       resources: ["replicasets"]
+       verbs: ["get", "list", "watch"]
+     # Pods: needed for pod selector lookup (digest verification), log capture, and
+     # rollout status watching. Pod names are dynamic, same caveat as ReplicaSets.
      - apiGroups: [""]
-       resources: ["pods", "events"]
+       resources: ["pods"]
        verbs: ["get", "list", "watch"]
      - apiGroups: [""]
        resources: ["pods/log"]
        verbs: ["get", "list"]
+     # Events: failure diagnostics ("Why did the rollout time out?")
+     - apiGroups: [""]
+       resources: ["events"]
+       verbs: ["get", "list", "watch"]
    ---
    # RoleBinding: bind the above Role to the federated identity (subject form per AKS auth mode)
    apiVersion: rbac.authorization.k8s.io/v1
@@ -633,6 +649,8 @@ Steps:
        verbs: ["get", "list"]
    # Bound to ALL service-fork identities (one RoleBinding per identity, or one for a Group).
    ```
+
+   **What this Role explicitly does NOT grant:** create/delete on anything, scale on non-named deployments, secrets read, configmaps write, exec into pods, port-forward, attach to running containers, anything in `apps/*/finalizers`. If you find yourself needing one of these for the CI loop, that's a signal to revisit the design rather than expand the Role.
 
    **The RoleBinding subject form depends on the AKS cluster's auth mode** — Phase 0 gate 0b answers which applies:
    - **AKS-managed Entra ID (recommended):** subject is `kind: User`, `name: <IDENTITY_PRINCIPAL_OID>`, `apiGroup: rbac.authorization.k8s.io`
@@ -765,10 +783,17 @@ Because GHCR packages are public (D4), AKS pulls without authentication. **No im
 
 If a CI step accidentally bakes a secret into a layer (e.g., an `ARG` exposed via `RUN curl -H "Authorization: Bearer …"`), it would become publicly downloadable. The Dockerfile in each service repo must be auditable for this and the CI step should verify there are no `RUN` lines that consume `${{ secrets.* }}` (Dockerfile lint is acceptable here).
 
-If at any point a service's GHCR package gets accidentally made private, AKS pulls will fail with `ErrImagePull`. The first push creates a package as **private by default**, so the onboarding script (Phase 3) explicitly flips visibility to public on first run, and a CI step continuously verifies it:
+If at any point a service's GHCR package gets accidentally made private, AKS pulls will fail with `ErrImagePull`. The first push creates a package as **private by default**, so the onboarding script (Phase 3) explicitly flips visibility to public on first run, and a CI step continuously verifies it.
+
+> **GHCR API endpoint depends on package ownership.** Packages pushed by a repo under an organization are owned by that org; packages pushed by a user-owned repo are owned by the user. The visibility flip + read endpoints differ:
+> - **Org-owned package** (this design's default; `danielscholl-osdu/<service>` pushes to `ghcr.io/danielscholl-osdu/<service>`): `/orgs/{ORG}/packages/container/{SERVICE}/visibility`
+> - **User-owned package** (only if the publishing repo is under a personal account): `/user/packages/container/{SERVICE}/visibility` (writes to *your own* packages) or `/users/{USER}/packages/container/{SERVICE}` (reads someone else's)
+>
+> The onboarding script and the W12 CI verification must pick the right one based on whether `${{ github.repository_owner }}` is an org or a user. `gh api /users/{owner}` returns `"type": "Organization"` vs `"User"` — that's the discriminator.
 
 ```bash
-gh api "/users/${ORG}/packages/container/${SERVICE}/visibility" \
+# Read visibility (org-owned package — the design's default)
+gh api "/orgs/${ORG}/packages/container/${SERVICE}" \
   --jq '.visibility' | grep -q 'public'
 ```
 
@@ -1011,7 +1036,9 @@ The work is sequenced in five phases, with explicit exit criteria for each.
    ```
    gh auth token | docker login ghcr.io -u danielscholl-osdu --password-stdin
    docker push ghcr.io/danielscholl-osdu/partition:poc
-   gh api -X PATCH /user/packages/container/partition/visibility -f visibility=public
+   # NOTE: danielscholl-osdu is an org, so the package is org-owned.
+   # For user-owned packages the endpoint is /user/packages/... — see §7.4 guidance.
+   gh api -X PATCH /orgs/danielscholl-osdu/packages/container/partition/visibility -f visibility=public
    ```
 
 4. **Manually provision managed identity** for `danielscholl-osdu/partition` per §6.1 steps 1-5. Use the RoleBinding form determined by step 0b.
@@ -1088,7 +1115,7 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 ### 9.3 Phase 2 — Workflow Implementation in Sandbox
 
-**Effort:** L (12 work items; sub-issues are mostly XS/S/M individually — see `cicd-implementation-plan.md`)
+**Effort:** L (13 work items; sub-issues are mostly XS/S/M individually — see `cicd-implementation-plan.md`)
 **Goal:** Build the new workflow stages in the sandbox engineering system. Iterate until end-to-end green on `danielscholl-osdu/partition`.
 
 **Work items (each is one or more PRs in sandbox):**
@@ -1248,7 +1275,7 @@ Per service:
 |-------|--------|-------|
 | Phase 0 — Manual POC + prerequisite gates + OIDC validation | **M** | Operator-driven; gates surface answers Phase 2 needs |
 | Phase 1 — Sandbox setup | **XS** | One verify step left |
-| Phase 2 — Workflow implementation | **L** | 12 work items; mostly XS/S/M individually, parallelizable per [`cicd-implementation-plan.md`](./cicd-implementation-plan.md) |
+| Phase 2 — Workflow implementation | **L** | 13 work items; mostly XS/S/M individually, parallelizable per [`cicd-implementation-plan.md`](./cicd-implementation-plan.md) |
 | Phase 3 — Onboarding automation (Python CLI extension) | **M** | Cross-repo: lands in `osdu-spi-stack` |
 | Phase 4 — PR back to official | **S** | Coordination + diff + ADR renumbering |
 | Phase 5 — Per-service rollout | **M** | Each service is S; 7 services, parallelizable across operators |
@@ -1463,6 +1490,8 @@ runs:
         cache-to: type=gha,mode=max
     # steps.push.outputs.digest is the canonical immutable identifier callers should use
     # when composing the deploy reference: ${image_repository}@${image_digest}
+    # IMPORTANT: docker/build-push-action emits `digest` already prefixed with "sha256:".
+    # Do not prepend "sha256:" again — that produces an invalid "@sha256:sha256:..." reference.
 ```
 
 **A.3. `aks-deploy/action.yml` sketch:**

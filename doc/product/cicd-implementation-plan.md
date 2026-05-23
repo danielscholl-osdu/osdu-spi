@@ -60,6 +60,7 @@ graph TD
         W7["W7<br/>release.yml tag"]:::batch1
         W10["W10<br/>rulesets"]:::batch1
         W11["W11<br/>GHCR retention"]:::batch1
+        W13["W13<br/>workflow_dispatch<br/>force-full-pipeline"]:::batch1
         POC["POC<br/>POC skeleton"]:::batch1
         ONBOARD["ONBOARD<br/>spi onboard CLI<br/>(cross-repo)"]:::batch1
         ADR32["ADR-032"]:::adr
@@ -84,6 +85,7 @@ graph TD
     W2 --> W5
     W3 --> W5
     W4 --> W5
+    W13 --> W5
 
     W2 -. soft .-> W7
     W2 -. soft .-> W11
@@ -101,15 +103,15 @@ Spawn agents in waves to avoid review overload. Each wave is fully parallel inte
 |------|-------|----------------|
 | **A — ground the design** | `ADR-032`, `ADR-033`, `ADR-034`, `ADR-035`, `ADR-036`, `POC` | Docs-only; reviewers reading these understand decisions before judging the code waves |
 | **B — composite actions** | `W1`, `W2`, `W3`, `W4`, `W8` | The substantive code; review for design adherence |
-| **C — plumbing + specs** | `W7`, `W10`, `W11`, `SPECS` | Lighter scope; runs parallel with Wave B |
+| **C — plumbing + specs** | `W7`, `W10`, `W11`, `W13`, `SPECS` | Lighter scope; runs parallel with Wave B. `W13` and `W5` both touch `validate.yml` — `W13` lands first so `W5` can reference its `workflow_dispatch` input |
 | **D — cross-repo** | `ONBOARD` | Different repo (`osdu-spi-stack`); no contention with anything else |
-| **Final — wire it together** | `W5` | Blocked by Wave B (`W1`, `W2`, `W3`, `W4`) |
+| **Final — wire it together** | `W5` | Blocked by Wave B (`W1`, `W2`, `W3`, `W4`) and `W13` |
 
 **Phase 0 runs in parallel with all waves**, human-driven. Gate findings may trigger small revisions to Wave B (e.g., Gate 0b might flip `W3`'s RoleBinding form). Plan for that — it's normal, not a setback.
 
 ## Live mapping
 
-The 17 sub-issues as currently filed on this fork (`danielscholl-osdu/osdu-spi`):
+The 18 sub-issues as currently filed on this fork (`danielscholl-osdu/osdu-spi`):
 
 | Slot | Issue | Effort | Title |
 |------|-------|--------|-------|
@@ -186,10 +188,11 @@ The action:
 
 **Acceptance criteria:**
 - [ ] Action declares inputs per §5.1 contract (`dockerfile_path`, `build_context`, `image_name`, `registry`, `org`, `jar_artifact_name`, `build_args`)
-- [ ] Outputs `image_digest` (sha256) and `image_ref` (full tag string)
-- [ ] Tag computation matches §5.1 + Appendix A.2
+- [ ] Outputs `image_repository` (e.g. `ghcr.io/<org>/<service>`) and `image_digest` (e.g. `sha256:abc123…`). **The digest value already includes the `sha256:` prefix** — that's what `docker/build-push-action@v6` emits; do NOT prepend it again or `kubectl set image @sha256:sha256:…` will produce an unpullable reference
+- [ ] Tag computation matches §5.1 + Appendix A.2 (immutable `:sha-*`, branch-snapshot on push, semver on tag push)
 - [ ] GHA cache wired (`cache-from: type=gha, cache-to: type=gha,mode=max`)
-- [ ] Visibility check step fails with clear message if package is private
+- [ ] Visibility check step uses the **org-package** endpoint (`/orgs/{owner}/packages/container/{name}`) when `${{ github.repository_owner }}` is an Organization, and the user-package endpoint (`/users/{owner}/packages/container/{name}`) otherwise. Discriminate via `gh api /users/{owner} --jq '.type'`. See §7.4
+- [ ] Visibility check fails the job with a clear message pointing at the onboarding script if package is private
 - [ ] No hardcoded secrets
 
 **Reference:** Design doc §5.1 + Appendix A.2 + §7.4 + §9.3 W2/W12.
@@ -261,7 +264,7 @@ Create `.github/actions/integration-test/action.yml` per §5.3 contract and Appe
 
 ### W5: Wire new jobs into validate.yml
 
-**Slot:** `W5` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W1`, `W2`, `W3`, `W4`
+**Slot:** `W5` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W1`, `W2`, `W3`, `W4`, `W13`
 
 **Context:**
 Append docker-build, deploy, integration-test jobs to `template-workflows/validate.yml`. New jobs gate on the §5.5 trust boundary clause. Per D12, the same jobs do NOT go into `build.yml`.
@@ -449,15 +452,17 @@ Implement `spi onboard --service <name> --org <org> --aks-cluster <cluster> --ak
 - [ ] Verifies `Deployment/<name>` exists in `osdu`; captures `K8S_DEPLOYMENT_NAME` and `K8S_CONTAINER_NAME`
 - [ ] Creates managed identity (idempotent)
 - [ ] Adds federated credentials for branches (wildcard if supported, else explicit), PR, tags
-- [ ] AKS Cluster User + namespace `edit` RoleBinding (form per AKS auth mode)
+- [ ] AKS Cluster User assignment + **least-privilege custom Role** (`spi-ci-${service}-deploy` with patch on the named Deployment + read pods/replicasets/events/logs, per §6.1 step 3 manifest — NOT the built-in `edit` ClusterRole) + read-only Role binding in `flux-system` for Kustomization checks. RoleBinding subject form depends on AKS auth mode (Phase 0 gate 0b)
 - [ ] Key Vault Secrets User assignment
-- [ ] Flips GHCR package to public + sets retention policy
-- [ ] Writes GitHub repo secrets and per-service variables (per §7.3 table)
+- [ ] **Flips GHCR package to public using the correct endpoint based on owner type:** `/orgs/{owner}/packages/...` for organizations, `/user/packages/...` (or `/users/{owner}/...` for cross-user reads) for personal accounts. Discriminate with `gh api /users/{owner} --jq '.type'` (returns `Organization` or `User`). See §7.4
+- [ ] Sets GHCR retention policy per §8.5
+- [ ] Writes GitHub repo secrets and per-service variables (per §7.3 table, including the new `ACCEPTANCE_TEST_DEPENDENCIES`)
 - [ ] Updates branch-protection ruleset on the target repo
 - [ ] `--dry-run` mode prints the plan without making changes
 - [ ] Outputs a JSON summary on completion
+- [ ] **Hard-blocked from production use until Phase 0 gates 0b (AKS auth mode) and 0f (operator RBAC) are closed.** Scaffolding the CLI command is fine; running it against a fork requires those answers
 
-**Reference:** Design doc §6.1 + §7.3 + §9.4.
+**Reference:** Design doc §6.1 + §7.3 + §7.4 + §9.4.
 
 **Out of scope:** Populating per-service KV secret values (separate manual step, out of band).
 
