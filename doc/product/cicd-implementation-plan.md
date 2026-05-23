@@ -110,11 +110,11 @@ The 17 sub-issues as currently filed on this fork (`danielscholl-osdu/osdu-spi`)
 | `W8` | [#10](https://github.com/danielscholl-osdu/osdu-spi/issues/10) | W8: New cluster-health-check composite action |
 | `POC` | [#11](https://github.com/danielscholl-osdu/osdu-spi/issues/11) | Create POC notes skeleton (cicd-poc-notes.md) |
 | `ONBOARD` | [#12](https://github.com/danielscholl-osdu/osdu-spi/issues/12) | Phase 3: Extend spi CLI with 'onboard' subcommand (cross-repo) |
-| `ADR-032` | [#13](https://github.com/danielscholl-osdu/osdu-spi/issues/13) | ADR-032: Draft 'CI/CD Deploy Loop via Suspended Flux' |
-| `ADR-033` | [#14](https://github.com/danielscholl-osdu/osdu-spi/issues/14) | ADR-033: Draft 'GHCR as Service Image Registry' |
-| `ADR-034` | [#15](https://github.com/danielscholl-osdu/osdu-spi/issues/15) | ADR-034: Draft 'Federated Identity for Actions to Azure' |
-| `ADR-035` | [#16](https://github.com/danielscholl-osdu/osdu-spi/issues/16) | ADR-035: Draft 'Azure-Only Maven Profile Restriction' |
-| `ADR-036` | [#17](https://github.com/danielscholl-osdu/osdu-spi/issues/17) | ADR-036: Draft 'Workflow Trust Boundaries for CI/CD' |
+| `ADR-032` | [#13](https://github.com/danielscholl-osdu/osdu-spi/issues/13) | ADR-032: Author 'CI/CD Deploy Loop via Suspended Flux' |
+| `ADR-033` | [#14](https://github.com/danielscholl-osdu/osdu-spi/issues/14) | ADR-033: Author 'GHCR as Service Image Registry' |
+| `ADR-034` | [#15](https://github.com/danielscholl-osdu/osdu-spi/issues/15) | ADR-034: Author 'Federated Identity for Actions to Azure' |
+| `ADR-035` | [#16](https://github.com/danielscholl-osdu/osdu-spi/issues/16) | ADR-035: Author 'Azure-Only Maven Profile Restriction' |
+| `ADR-036` | [#17](https://github.com/danielscholl-osdu/osdu-spi/issues/17) | ADR-036: Author 'Workflow Trust Boundaries for CI/CD' |
 | `SPECS` | [#18](https://github.com/danielscholl-osdu/osdu-spi/issues/18) | Create docker-build / deploy / integration-test workflow specs |
 
 ---
@@ -439,7 +439,7 @@ Implement `spi onboard --service <name> --org <org> --aks-cluster <cluster> --ak
 
 ---
 
-### ADR-032: Draft 'CI/CD Deploy Loop via Suspended Flux'
+### ADR-032: Author 'CI/CD Deploy Loop via Suspended Flux'
 
 **Slot:** `ADR-032` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
 
@@ -447,7 +447,7 @@ Implement `spi onboard --service <name> --org <org> --aks-cluster <cluster> --ak
 The design pins Flux as permanently suspended on the shared CI cluster so per-PR workflows can `kubectl set image` freely. This is a foundational deployment-model decision and deserves an ADR.
 
 **Task:**
-Draft `doc/src/adr/032-cicd-deploy-loop-via-suspended-flux.md` per the existing ADR template (see `doc/src/adr/0*.md`). Content per Appendix B ADR-032 of the design doc, expanded to ADR-standard length: Context, Decision, Consequences, Alternatives Considered (Flux per-service annotations, Argo CD, Helm CI release-per-PR).
+Author `doc/src/adr/032-cicd-deploy-loop-via-suspended-flux.md` per the existing ADR template (see `doc/src/adr/0*.md`). Content per Appendix B ADR-032 of the design doc, expanded to ADR-standard length: Context, Decision, Consequences, Alternatives Considered (Flux per-service annotations, Argo CD, Helm CI release-per-PR).
 
 **Files:**
 - `doc/src/adr/032-cicd-deploy-loop-via-suspended-flux.md` (new)
@@ -464,7 +464,7 @@ Draft `doc/src/adr/032-cicd-deploy-loop-via-suspended-flux.md` per the existing 
 
 ---
 
-### ADR-033: Draft 'GHCR as Service Image Registry'
+### ADR-033: Author 'GHCR as Service Image Registry'
 
 **Slot:** `ADR-033` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
 
@@ -472,7 +472,7 @@ Draft `doc/src/adr/032-cicd-deploy-loop-via-suspended-flux.md` per the existing 
 Decision to use GHCR with public visibility for service images, vs. ACR or private GHCR alternatives.
 
 **Task:**
-Draft `doc/src/adr/033-ghcr-as-service-image-registry.md`. Content per Appendix B ADR-033 of design doc; include the §7.4 fallback discussion (ACR + AcrPull, or private GHCR + image-pull-secret) as Alternatives Considered.
+Author `doc/src/adr/033-ghcr-as-service-image-registry.md`. Content per Appendix B ADR-033 of design doc; include the §7.4 fallback discussion (ACR + AcrPull, or private GHCR + image-pull-secret) as Alternatives Considered.
 
 **Files:**
 - `doc/src/adr/033-ghcr-as-service-image-registry.md` (new)
@@ -488,7 +488,7 @@ Draft `doc/src/adr/033-ghcr-as-service-image-registry.md`. Content per Appendix 
 
 ---
 
-### ADR-034: Draft 'Federated Identity for Actions to Azure'
+### ADR-034: Author 'Federated Identity for Actions to Azure'
 
 **Slot:** `ADR-034` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
 
@@ -496,7 +496,7 @@ Draft `doc/src/adr/033-ghcr-as-service-image-registry.md`. Content per Appendix 
 Per-fork managed identity with federated credentials, replacing static `AZURE_CREDENTIALS` JSON secrets. Provides per-service blast-radius isolation.
 
 **Task:**
-Draft `doc/src/adr/034-federated-identity-actions-to-azure.md`. Content per Appendix B ADR-034. Include §6.1 federated-credential subject coverage (wildcards including refs/heads + refs/tags + pull_request) in the Decision section.
+Author `doc/src/adr/034-federated-identity-actions-to-azure.md`. Content per Appendix B ADR-034. Include §6.1 federated-credential subject coverage (wildcards including refs/heads + refs/tags + pull_request) in the Decision section.
 
 **Files:**
 - `doc/src/adr/034-federated-identity-actions-to-azure.md` (new)
@@ -513,7 +513,7 @@ Draft `doc/src/adr/034-federated-identity-actions-to-azure.md`. Content per Appe
 
 ---
 
-### ADR-035: Draft 'Azure-Only Maven Profile Restriction'
+### ADR-035: Author 'Azure-Only Maven Profile Restriction'
 
 **Slot:** `ADR-035` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
 
@@ -521,7 +521,7 @@ Draft `doc/src/adr/034-federated-identity-actions-to-azure.md`. Content per Appe
 Build only `-P <service>-azure` profile in CI, skipping AWS/IBM/GC profiles.
 
 **Task:**
-Draft `doc/src/adr/035-azure-only-maven-profile.md`. Content per Appendix B ADR-035.
+Author `doc/src/adr/035-azure-only-maven-profile.md`. Content per Appendix B ADR-035.
 
 **Files:**
 - `doc/src/adr/035-azure-only-maven-profile.md` (new)
@@ -538,7 +538,7 @@ Draft `doc/src/adr/035-azure-only-maven-profile.md`. Content per Appendix B ADR-
 
 ---
 
-### ADR-036: Draft 'Workflow Trust Boundaries for CI/CD'
+### ADR-036: Author 'Workflow Trust Boundaries for CI/CD'
 
 **Slot:** `ADR-036` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
 
@@ -546,7 +546,7 @@ Draft `doc/src/adr/035-azure-only-maven-profile.md`. Content per Appendix B ADR-
 The new federated-identity-bearing jobs must not run on attacker-controlled code (`pull_request_target`, external-fork PRs, `dependabot[bot]`). This trust model is a load-bearing security decision and deserves an ADR.
 
 **Task:**
-Draft `doc/src/adr/036-workflow-trust-boundaries.md`. Content per Appendix B ADR-036 of the design doc.
+Author `doc/src/adr/036-workflow-trust-boundaries.md`. Content per Appendix B ADR-036 of the design doc.
 
 **Files:**
 - `doc/src/adr/036-workflow-trust-boundaries.md` (new)
