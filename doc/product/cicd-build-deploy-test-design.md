@@ -6,6 +6,11 @@
 **Date:** 2026-05-22 (v1), revised 2026-05-22 (v2)
 **Target System:** `Azure/osdu-spi` engineering template + `osdu-spi-stack` runtime + 8 service forks
 
+> **Companion docs:**
+> - **Work breakdown & sub-issue catalog:** [`cicd-implementation-plan.md`](./cicd-implementation-plan.md) — 17 sub-issue specs, dependency graph, wave strategy, fork-regeneration runbook
+> - **Live epic:** [#1](https://github.com/danielscholl-osdu/osdu-spi/issues/1)
+> - **POC notes (Phase 0 output):** [`cicd-poc-notes.md`](./cicd-poc-notes.md) *(created during Phase 0 by the `POC` sub-issue)*
+
 **Revision history:**
 - **v1** — initial design from brainstorming
 - **v2** — incorporated review findings: locked validate.yml-only deploy stages (D12); added per-service `K8S_DEPLOYMENT_NAME`/`K8S_CONTAINER_NAME` variables (D13); pinned trust boundaries for workflow events (D14, ADR-036); cascade-driven pushes deploy (D15); promoted Q6 to Phase 0 prerequisite; added OIDC validation step to Phase 0; added cross-service contamination / test data isolation handling (§8.8, §8.9); split Flux invariant into permanent steady state + planned-outage baseline refresh (§7.5); GHCR public-visibility compliance gate; expanded risks (R13–R17)
