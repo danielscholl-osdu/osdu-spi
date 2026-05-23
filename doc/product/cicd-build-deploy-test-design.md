@@ -2,8 +2,7 @@
 ## Detailed Design & Implementation Plan
 
 **Status:** Draft v2 — pre-implementation design, post-review refinement
-**Authors:** Daniel Scholl (with Claude)
-**Date:** 2026-05-22 (v1), revised 2026-05-22 (v2)
+**Authors:** Daniel Scholl
 **Target System:** `Azure/osdu-spi` engineering template + `osdu-spi-stack` runtime + 8 service forks
 
 > **Companion docs:**
@@ -62,7 +61,7 @@ The single largest risk-reduction lever is the **sandbox engineering system**: a
 - ACR provisioned as part of "Core Infra" phase (currently unused for service images — Flux pulls from community registry)
 - Key Vault wired for centralized secrets, Workload Identity for service auth
 
-**`danielscholl-osdu/partition`** — First SPI service fork, established 2026-05-22. Initialized from `Azure/osdu-spi` template. Contains:
+**`danielscholl-osdu/partition`** — First SPI service fork. Initialized from `Azure/osdu-spi` template. Contains:
 - Forked partition source (Java multi-module Maven project, multiple cloud providers)
 - `devops/azure/Dockerfile`, `devops/azure/chart/` (legacy, will become irrelevant — single chart in stack)
 - `partition-acceptance-test/` Maven module (integration tests)

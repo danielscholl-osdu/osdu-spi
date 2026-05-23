@@ -11,7 +11,7 @@
 This document is the **canonical work breakdown** for the CI/CD pipeline epic. It serves three audiences:
 
 1. **Humans orchestrating the rollout** — track which slots are in flight, which are blocked, what's next.
-2. **Copilot / Claude Code agents** assigned to a single sub-issue — understand context, see where your slice fits, find the design-doc references your task points at.
+2. **Coding agents** assigned to a single sub-issue — understand context, see where your slice fits, find the design-doc references your task points at.
 3. **Forkers** rebuilding this repo from scratch — regenerate the 17 GitHub issues with one script run.
 
 ## How to use this document
