@@ -26,6 +26,20 @@ This document is the **canonical work breakdown** for the CI/CD pipeline epic. I
 
 Each sub-issue has a **slot ID** (`W1`, `W7`, `ADR-032`, `POC`, `ONBOARD`, `SPECS`) that is stable across regenerations, and a **live issue number** (`#2`, `#3`, …) that changes when the issues are recreated on a fresh fork. References in this doc use slot IDs; the live mapping appears in the [Live mapping](#live-mapping) section below.
 
+## Effort sizing
+
+Each sub-issue carries a T-shirt size describing **effort scale**, not wall-clock time. Real elapsed time depends on agent runtime, review cycles, and how many revisions a task needs.
+
+| Size | Meaning |
+|------|---------|
+| **XS** | Trivial. Single setting, one-line change, or new file from a near-complete sketch. |
+| **S**  | Small. One file or one focused composite; well-scoped; minimal review surface. |
+| **M**  | Medium. Multiple interconnected files; multi-step component; cross-cutting concerns within one subsystem. |
+| **L**  | Large. Significant new logic; spans multiple subsystems or integrates several services. |
+| **XL** | Extra large. Major undertaking; would normally be broken down further before assignment. |
+
+> Sizes are not budgets. An XS issue can take an afternoon if review finds a subtle bug; an M issue can land in an hour if the design sketch was perfect. They're for **wave planning** (don't fan out 10 L's to agents at once) and **review prioritization**, not delivery commitments.
+
 ---
 
 ## Dependency map
@@ -97,25 +111,25 @@ Spawn agents in waves to avoid review overload. Each wave is fully parallel inte
 
 The 17 sub-issues as currently filed on this fork (`danielscholl-osdu/osdu-spi`):
 
-| Slot | Issue | Title |
-|------|-------|-------|
-| `W1` | [#2](https://github.com/danielscholl-osdu/osdu-spi/issues/2) | W1: Add maven_profile input to java-build action |
-| `W2` | [#3](https://github.com/danielscholl-osdu/osdu-spi/issues/3) | W2: New docker-build composite action |
-| `W3` | [#4](https://github.com/danielscholl-osdu/osdu-spi/issues/4) | W3: New aks-deploy composite action |
-| `W4` | [#5](https://github.com/danielscholl-osdu/osdu-spi/issues/5) | W4: New integration-test composite action |
-| `W5` | [#6](https://github.com/danielscholl-osdu/osdu-spi/issues/6) | W5: Wire new jobs into validate.yml |
-| `W7` | [#7](https://github.com/danielscholl-osdu/osdu-spi/issues/7) | W7: Add release-version image tag to release.yml |
-| `W10` | [#8](https://github.com/danielscholl-osdu/osdu-spi/issues/8) | W10: Update branch-protection ruleset for new required checks |
-| `W11` | [#9](https://github.com/danielscholl-osdu/osdu-spi/issues/9) | W11: GHCR retention scheduled workflow |
-| `W8` | [#10](https://github.com/danielscholl-osdu/osdu-spi/issues/10) | W8: New cluster-health-check composite action |
-| `POC` | [#11](https://github.com/danielscholl-osdu/osdu-spi/issues/11) | Create POC notes skeleton (cicd-poc-notes.md) |
-| `ONBOARD` | [#12](https://github.com/danielscholl-osdu/osdu-spi/issues/12) | Phase 3: Extend spi CLI with 'onboard' subcommand (cross-repo) |
-| `ADR-032` | [#13](https://github.com/danielscholl-osdu/osdu-spi/issues/13) | ADR-032: Author 'CI/CD Deploy Loop via Suspended Flux' |
-| `ADR-033` | [#14](https://github.com/danielscholl-osdu/osdu-spi/issues/14) | ADR-033: Author 'GHCR as Service Image Registry' |
-| `ADR-034` | [#15](https://github.com/danielscholl-osdu/osdu-spi/issues/15) | ADR-034: Author 'Federated Identity for Actions to Azure' |
-| `ADR-035` | [#16](https://github.com/danielscholl-osdu/osdu-spi/issues/16) | ADR-035: Author 'Azure-Only Maven Profile Restriction' |
-| `ADR-036` | [#17](https://github.com/danielscholl-osdu/osdu-spi/issues/17) | ADR-036: Author 'Workflow Trust Boundaries for CI/CD' |
-| `SPECS` | [#18](https://github.com/danielscholl-osdu/osdu-spi/issues/18) | Create docker-build / deploy / integration-test workflow specs |
+| Slot | Issue | Effort | Title |
+|------|-------|--------|-------|
+| `W1` | [#2](https://github.com/danielscholl-osdu/osdu-spi/issues/2) | XS | W1: Add maven_profile input to java-build action |
+| `W2` | [#3](https://github.com/danielscholl-osdu/osdu-spi/issues/3) | M | W2: New docker-build composite action |
+| `W3` | [#4](https://github.com/danielscholl-osdu/osdu-spi/issues/4) | M | W3: New aks-deploy composite action |
+| `W4` | [#5](https://github.com/danielscholl-osdu/osdu-spi/issues/5) | M | W4: New integration-test composite action |
+| `W5` | [#6](https://github.com/danielscholl-osdu/osdu-spi/issues/6) | S | W5: Wire new jobs into validate.yml |
+| `W7` | [#7](https://github.com/danielscholl-osdu/osdu-spi/issues/7) | XS | W7: Add release-version image tag to release.yml |
+| `W10` | [#8](https://github.com/danielscholl-osdu/osdu-spi/issues/8) | XS | W10: Update branch-protection ruleset for new required checks |
+| `W11` | [#9](https://github.com/danielscholl-osdu/osdu-spi/issues/9) | S | W11: GHCR retention scheduled workflow |
+| `W8` | [#10](https://github.com/danielscholl-osdu/osdu-spi/issues/10) | S | W8: New cluster-health-check composite action |
+| `POC` | [#11](https://github.com/danielscholl-osdu/osdu-spi/issues/11) | XS | Create POC notes skeleton (cicd-poc-notes.md) |
+| `ONBOARD` | [#12](https://github.com/danielscholl-osdu/osdu-spi/issues/12) | L | Phase 3: Extend spi CLI with 'onboard' subcommand (cross-repo) |
+| `ADR-032` | [#13](https://github.com/danielscholl-osdu/osdu-spi/issues/13) | XS | ADR-032: Author 'CI/CD Deploy Loop via Suspended Flux' |
+| `ADR-033` | [#14](https://github.com/danielscholl-osdu/osdu-spi/issues/14) | XS | ADR-033: Author 'GHCR as Service Image Registry' |
+| `ADR-034` | [#15](https://github.com/danielscholl-osdu/osdu-spi/issues/15) | XS | ADR-034: Author 'Federated Identity for Actions to Azure' |
+| `ADR-035` | [#16](https://github.com/danielscholl-osdu/osdu-spi/issues/16) | XS | ADR-035: Author 'Azure-Only Maven Profile Restriction' |
+| `ADR-036` | [#17](https://github.com/danielscholl-osdu/osdu-spi/issues/17) | XS | ADR-036: Author 'Workflow Trust Boundaries for CI/CD' |
+| `SPECS` | [#18](https://github.com/danielscholl-osdu/osdu-spi/issues/18) | S | Create docker-build / deploy / integration-test workflow specs |
 
 ---
 
@@ -127,7 +141,7 @@ Each subsection below is a copy-pasteable issue body. The H3 header is the issue
 
 ### W1: Add maven_profile input to java-build action
 
-**Slot:** `W1` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `W1` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 Today `.github/actions/java-build/action.yml` runs `mvn clean install` with no `-P` flag, building all cloud provider modules. The new CI/CD design (D5, ADR-035) restricts service builds to the Azure profile (e.g. `partition-azure`) to speed builds and narrow the unit-test signal. The profile name is a per-service repo variable.
@@ -152,7 +166,7 @@ Add an optional input `maven_profile` to the action. When set, the Maven command
 
 ### W2: New docker-build composite action
 
-**Slot:** `W2` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `W2` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 The new pipeline needs a composite action that builds a service container image from the Maven JAR artifacts and pushes it to GHCR. Image references are immutable per SHA (`:sha-<short>`), with additional mutable tags for branches (`:<branch>-snapshot`) and release-please versions (`:<version>`). Also verifies the GHCR package is public (W12 — covered by this issue).
@@ -185,7 +199,7 @@ The action:
 
 ### W3: New aks-deploy composite action
 
-**Slot:** `W3` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `W3` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 Composite action that authenticates to Azure via OIDC, asserts Flux is suspended, runs `kubectl set image`, waits for rollout, captures the deployed image digest for downstream verification. Per D13, deployment_name and container_name come from per-service repo variables (not derived from SERVICE_NAME).
@@ -213,7 +227,7 @@ Create `.github/actions/aks-deploy/action.yml` per Appendix A.3.
 
 ### W4: New integration-test composite action
 
-**Slot:** `W4` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `W4` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 Composite action that pulls acceptance test secrets from Key Vault, verifies the pod is still running the digest we just deployed (defending against mid-test Flux resume), probes cross-service health, then runs the service's acceptance-test Maven module against the gateway URL.
@@ -241,7 +255,7 @@ Create `.github/actions/integration-test/action.yml` per §5.3 contract and Appe
 
 ### W5: Wire new jobs into validate.yml
 
-**Slot:** `W5` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Blocked by:** `W1`, `W2`, `W3`, `W4`
+**Slot:** `W5` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W1`, `W2`, `W3`, `W4`
 
 **Context:**
 Append docker-build, deploy, integration-test jobs to `template-workflows/validate.yml`. New jobs gate on the §5.5 trust boundary clause. Per D12, the same jobs do NOT go into `build.yml`.
@@ -277,7 +291,7 @@ Downstream jobs (`deploy`, `integration-test`) inherit gating via `needs:`.
 
 ### W7: Add release-version image tag to release.yml
 
-**Slot:** `W7` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Blocked by:** `W2` (soft — scaffold in parallel, integrate after)
+**Slot:** `W7` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** `W2` (soft — scaffold in parallel, integrate after)
 
 **Context:**
 When release-please merges a release PR and creates a tag (e.g. `v1.2.3`), the existing image (built on merge to main) needs to be re-tagged with the version. Per design, release.yml does NOT re-deploy — deploy already happened on the merge to main.
@@ -301,7 +315,7 @@ Update `.github/template-workflows/release.yml` to add a tag-pull-tag-push step 
 
 ### W8: New cluster-health-check composite action
 
-**Slot:** `W8` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `W8` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 Pre-flight check used by `deploy` and optionally by a scheduled health-badge workflow. Distinguishes "cluster is down" from "your code is broken" so PR authors aren't blamed for infra outages.
@@ -329,7 +343,7 @@ Create `.github/actions/cluster-health-check/action.yml` performing:
 
 ### W10: Update branch-protection ruleset for new required checks
 
-**Slot:** `W10` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `W10` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 Per G2, integration-test failure must block PRs to main. Required checks are defined in `.github/rulesets/default-branch.json` and propagated to forks by the init workflow.
@@ -356,7 +370,7 @@ Verify the init workflow + `setup-rulesets.sh` (in `.github/local-actions/init-h
 
 ### W11: GHCR retention scheduled workflow
 
-**Slot:** `W11` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Blocked by:** `W2` (soft)
+**Slot:** `W11` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W2` (soft)
 
 **Context:**
 Without retention, GHCR fills up with `:sha-*` tags forever. Per §8.5 policy:
@@ -386,7 +400,7 @@ Create `.github/template-workflows/ghcr-retention.yml` that runs weekly (cron) a
 
 ### Create POC notes skeleton (cicd-poc-notes.md)
 
-**Slot:** `POC` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `POC` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 Phase 0 produces a captured-knowledge document. Phase 2 work depends on values that Phase 0 surfaces (gateway URL, KV secret names, AKS auth mode, etc.). A skeleton lets Phase 0 fill in the blanks without inventing structure.
@@ -412,7 +426,7 @@ Create `doc/product/cicd-poc-notes.md` with section headings + placeholders for 
 
 ### Phase 3: Extend spi CLI with 'onboard' subcommand (cross-repo)
 
-**Slot:** `ONBOARD` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi-stack`
+**Slot:** `ONBOARD` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `L` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi-stack`
 
 **Context:**
 Per §9.4 of the design doc, onboarding a new service fork should be a single command operation. Extending the existing `spi` Python CLI is preferable to a standalone bash script (idempotency, retry logic, JSON handling already exist).
@@ -441,7 +455,7 @@ Implement `spi onboard --service <name> --org <org> --aks-cluster <cluster> --ak
 
 ### ADR-032: Author 'CI/CD Deploy Loop via Suspended Flux'
 
-**Slot:** `ADR-032` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `ADR-032` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 The design pins Flux as permanently suspended on the shared CI cluster so per-PR workflows can `kubectl set image` freely. This is a foundational deployment-model decision and deserves an ADR.
@@ -466,7 +480,7 @@ Author `doc/src/adr/032-cicd-deploy-loop-via-suspended-flux.md` per the existing
 
 ### ADR-033: Author 'GHCR as Service Image Registry'
 
-**Slot:** `ADR-033` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `ADR-033` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 Decision to use GHCR with public visibility for service images, vs. ACR or private GHCR alternatives.
@@ -490,7 +504,7 @@ Author `doc/src/adr/033-ghcr-as-service-image-registry.md`. Content per Appendix
 
 ### ADR-034: Author 'Federated Identity for Actions to Azure'
 
-**Slot:** `ADR-034` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `ADR-034` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 Per-fork managed identity with federated credentials, replacing static `AZURE_CREDENTIALS` JSON secrets. Provides per-service blast-radius isolation.
@@ -515,7 +529,7 @@ Author `doc/src/adr/034-federated-identity-actions-to-azure.md`. Content per App
 
 ### ADR-035: Author 'Azure-Only Maven Profile Restriction'
 
-**Slot:** `ADR-035` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `ADR-035` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 Build only `-P <service>-azure` profile in CI, skipping AWS/IBM/GC profiles.
@@ -540,7 +554,7 @@ Author `doc/src/adr/035-azure-only-maven-profile.md`. Content per Appendix B ADR
 
 ### ADR-036: Author 'Workflow Trust Boundaries for CI/CD'
 
-**Slot:** `ADR-036` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `ADR-036` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 The new federated-identity-bearing jobs must not run on attacker-controlled code (`pull_request_target`, external-fork PRs, `dependabot[bot]`). This trust model is a load-bearing security decision and deserves an ADR.
@@ -566,7 +580,7 @@ Author `doc/src/adr/036-workflow-trust-boundaries.md`. Content per Appendix B AD
 
 ### Create docker-build / deploy / integration-test workflow specs
 
-**Slot:** `SPECS` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Blocked by:** None
+**Slot:** `SPECS` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 The `doc/product/` directory has spec docs for each workflow (build, release, validate, cascade, etc.). The three new pipeline stages need matching specs for the Phase 4 PR back to `Azure/osdu-spi`.

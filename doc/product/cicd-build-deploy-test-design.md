@@ -899,7 +899,7 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 ### 9.1 Phase 0 — Manual Proof of Concept
 
-**Duration:** 2-4 days (was 1-3; expanded for prerequisite verification)
+**Effort:** M
 **Goal:** Prove the deploy loop works end-to-end before committing to workflow YAML. Surface all auth/networking gotchas in interactive debug, not via 10 GitHub Actions runs.
 
 **Scope:** Use existing `danielscholl-osdu/partition` fork and existing spi-stack cluster. No engineering system changes.
@@ -991,7 +991,7 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 ### 9.2 Phase 1 — Sandbox Engineering System Setup
 
-**Duration:** 0.5-1 day
+**Effort:** XS
 **Status:** Largely complete; one verification step outstanding.
 
 **Goal:** Establish the safe iteration environment.
@@ -1011,7 +1011,7 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 ### 9.3 Phase 2 — Workflow Implementation in Sandbox
 
-**Duration:** 1-2 weeks
+**Effort:** L (12 work items; sub-issues are mostly XS/S/M individually — see `cicd-implementation-plan.md`)
 **Goal:** Build the new workflow stages in the sandbox engineering system. Iterate until end-to-end green on `danielscholl-osdu/partition`.
 
 **Work items (each is one or more PRs in sandbox):**
@@ -1043,7 +1043,7 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 ### 9.4 Phase 3 — Per-Fork Infrastructure Automation
 
-**Duration:** 2-3 days
+**Effort:** M (cross-repo: lands in `osdu-spi-stack`)
 **Goal:** Make onboarding a new service fork a single-command operation.
 
 **Deliverable:** Extend the existing `spi` Python CLI in `osdu-spi-stack` with a new `onboard` subcommand (rather than a standalone bash script — `spi` already has the `az`/`kubectl` plumbing, retry logic, and JSON handling that an idempotent shell script would have to reinvent):
@@ -1078,7 +1078,7 @@ What it does, in order (each step is idempotent):
 
 ### 9.5 Phase 4 — PR Back to Official `Azure/osdu-spi`
 
-**Duration:** 1-2 days
+**Effort:** S (mostly coordination; no new code beyond what Phase 2 produced)
 **Goal:** Land the validated design in the official engineering system.
 
 **Pre-step — re-check ADR numbering:**
@@ -1134,7 +1134,7 @@ The sandbox (`danielscholl-osdu/osdu-spi`) is **kept long-lived** rather than ar
 
 ### 9.6 Phase 5 — Rollout to Remaining Services
 
-**Duration:** 1 day per service, parallelizable
+**Effort:** M total — each service is S (initialize + onboard + per-service audit + first CI run); 7 services, parallelizable across operators
 **Goal:** All 8 services on the new CI loop.
 
 **Order (by dependency, not alphabet — so each newly-onboarded service has its acceptance-test dependencies already running):**
@@ -1164,18 +1164,18 @@ Per service:
 - §8.8 audit table fully populated
 - Each fork's `Deployment` was found and patched successfully — confirming the chart-name convention holds across services
 
-### 9.7 Schedule estimate
+### 9.7 Effort summary
 
-| Phase | Duration | Cumulative |
-|-------|---------|-----------|
-| Phase 0: Manual POC + step 0 prerequisites + OIDC validation | 2-4 days | 2-4 d |
-| Phase 1: Sandbox setup (mostly done) | 0.25-0.5 day | 2.25-4.5 d |
-| Phase 2: Workflow implementation (12 work items) | 6-12 days | 8.25-16.5 d |
-| Phase 3: Onboarding automation (Python CLI extension) | 2-3 days | 10.25-19.5 d |
-| Phase 4: PR back to official | 1-2 days | 11.25-21.5 d |
-| Phase 5: Per-service rollout | 1 day × 7 services (parallelizable) | 18-28 d |
+| Phase | Effort | Notes |
+|-------|--------|-------|
+| Phase 0 — Manual POC + prerequisite gates + OIDC validation | **M** | Operator-driven; gates surface answers Phase 2 needs |
+| Phase 1 — Sandbox setup | **XS** | One verify step left |
+| Phase 2 — Workflow implementation | **L** | 12 work items; mostly XS/S/M individually, parallelizable per [`cicd-implementation-plan.md`](./cicd-implementation-plan.md) |
+| Phase 3 — Onboarding automation (Python CLI extension) | **M** | Cross-repo: lands in `osdu-spi-stack` |
+| Phase 4 — PR back to official | **S** | Coordination + diff + ADR renumbering |
+| Phase 5 — Per-service rollout | **M** | Each service is S; 7 services, parallelizable across operators |
 
-Roughly **4-6 weeks** end-to-end (expanded from prior estimate). Most slack is in Phase 2 (workflow iteration) and Phase 5 (parallelizable across services with multiple operators).
+T-shirt sizes describe **effort scale**, not wall-clock time. Real elapsed time depends on operator count, review cycles, and how many gate answers from Phase 0 trigger Phase 2 revisions. See the implementation plan for per-sub-issue sizing.
 
 ---
 
