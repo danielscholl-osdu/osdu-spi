@@ -73,6 +73,7 @@ graph TD
 
     subgraph Batch2["Batch 2 — after Batch 1"]
         W5["W5<br/>wire validate.yml"]:::batch2
+        W14["W14<br/>restore-deployment<br/>workflow"]:::batch2
     end
 
     subgraph Phase0["Phase 0 — human-driven, parallel with everything"]
@@ -86,6 +87,7 @@ graph TD
     W3 --> W5
     W4 --> W5
     W13 --> W5
+    W3 --> W14
 
     W2 -. soft .-> W7
     W2 -. soft .-> W11
@@ -105,13 +107,13 @@ Spawn agents in waves to avoid review overload. Each wave is fully parallel inte
 | **B — composite actions** | `W1`, `W2`, `W3`, `W4`, `W8` | The substantive code; review for design adherence |
 | **C — plumbing + specs** | `W7`, `W10`, `W11`, `W13`, `SPECS` | Lighter scope; runs parallel with Wave B. `W13` and `W5` both touch `validate.yml` — `W13` lands first so `W5` can reference its `workflow_dispatch` input |
 | **D — cross-repo** | `ONBOARD` | Different repo (`osdu-spi-stack`); no contention with anything else |
-| **Final — wire it together** | `W5` | Blocked by Wave B (`W1`, `W2`, `W3`, `W4`) and `W13` |
+| **Final — wire it together** | `W5`, `W14` | `W5` blocked by Wave B (`W1`, `W2`, `W3`, `W4`) and `W13`. `W14` blocked by `W3` (consumes `aks-deploy`). |
 
 **Phase 0 runs in parallel with all waves**, human-driven. Gate findings may trigger small revisions to Wave B (e.g., Gate 0b might flip `W3`'s RoleBinding form). Plan for that — it's normal, not a setback.
 
 ## Live mapping
 
-The 18 sub-issues as currently filed on this fork (`danielscholl-osdu/osdu-spi`):
+The 19 sub-issues as currently filed on this fork (`danielscholl-osdu/osdu-spi`):
 
 | Slot | Issue | Effort | Title |
 |------|-------|--------|-------|
@@ -133,6 +135,7 @@ The 18 sub-issues as currently filed on this fork (`danielscholl-osdu/osdu-spi`)
 | `ADR-036` | [#17](https://github.com/danielscholl-osdu/osdu-spi/issues/17) | XS | ADR-036: Author 'Workflow Trust Boundaries for CI/CD' |
 | `SPECS` | [#18](https://github.com/danielscholl-osdu/osdu-spi/issues/18) | S | Create docker-build / deploy / integration-test workflow specs |
 | `W13` | [#19](https://github.com/danielscholl-osdu/osdu-spi/issues/19) | XS | W13: Add workflow_dispatch force-full-pipeline path to validate.yml |
+| `W14` | [#20](https://github.com/danielscholl-osdu/osdu-spi/issues/20) | S | W14: New restore-deployment workflow |
 
 ---
 
@@ -284,16 +287,32 @@ Downstream jobs (`deploy`, `integration-test`) inherit gating via `needs:`.
 
 **Acceptance criteria:**
 - [ ] Three new jobs (`docker-build`, `deploy`, `integration-test`) appended after `java-build`
-- [ ] `if:` clause on `docker-build` matches §5.5 trust boundary table
+- [ ] **Combined `if:` clause on `docker-build`**: admits both the §5.5 trust-boundary cases AND the W13 manual escape hatch. Exact form:
+  ```yaml
+  if: |
+    (
+      needs.check-initialization.outputs.initialized == 'true' &&
+      needs.check-repo-state.outputs.is_java_repo == 'true' &&
+      needs.java-build.outputs.build_result == 'success' &&
+      github.actor != 'dependabot[bot]' &&
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    ) || (
+      github.event_name == 'workflow_dispatch' &&
+      inputs.force_full_pipeline == true
+    )
+  ```
+  Without the second clause, W13's `force_full_pipeline` input lands but the gated jobs still don't run on manual dispatch — defeating W13's purpose.
 - [ ] `deploy` job uses per-service concurrency group `spi-stack-${{ vars.SERVICE_NAME }}` (per-service, not cluster-wide — §5.2)
 - [ ] `docker-build` outputs `image_repository` + `image_digest`; `deploy` consumes them and composes `${repo}@${digest}` — **deploy is never passed a tag**
-- [ ] `deploy` outputs `previous_digest` (for manual restore per §8.9) and `deployed_digest` (for integration-test verification)
+- [ ] `deploy` outputs `previous_digest` (for manual restore per §8.9 — consumed by W14's `restore-deployment.yml`) and `deployed_digest` (for integration-test verification)
 - [ ] `integration-test` is passed `expected_digest: ${{ needs.deploy.outputs.deployed_digest }}` plus all service-level vars (`vars.ACCEPTANCE_TEST_DIR`, `vars.K8S_DEPLOYMENT_NAME`, `vars.K8S_CONTAINER_NAME`, `vars.ACCEPTANCE_TEST_SECRET_MAP`, `vars.ACCEPTANCE_TEST_DEPENDENCIES`)
-- [ ] **`workflow_dispatch` "force-full-pipeline" input added**, so an operator can manually run the full deploy/test stages on the current HEAD even when the triggering change is paths-ignored (template-sync from sandbox is paths-ignored today; this is the loop's only manual hook — see W13 + §9.3 phase exit criteria)
+- [ ] **`workflow_dispatch` "force-full-pipeline" input wired in** (W13 declares it; W5 consumes it via the combined `if:` clause above) so an operator can manually run the full deploy/test stages on the current HEAD even when the triggering change is paths-ignored. Include a test plan: dispatch the workflow with `force_full_pipeline: true` and confirm `docker-build` / `deploy` / `integration-test` all run.
 - [ ] `permissions:` block includes `id-token: write`, `packages: write`, `contents: read` (these live on the **job**, not inside composite actions)
 - [ ] `code-validation` job remains in parallel (unchanged)
 - [ ] **No changes to `build.yml`**
-- [ ] **Hard-blocked from merging until Phase 0 step 4a (OIDC validation) is green** for at least the four event subjects we care about (main push, feature push, PR sync, tag push). Plus all blocking deps (`W1`, `W2`, `W3`, `W4`) merged.
+- [ ] **Hard-blocked from merging until Phase 0 step 4a (OIDC validation) is green** for at least the four event subjects we care about (main push, feature push, PR sync, tag push). Plus all blocking deps (`W1`, `W2`, `W3`, `W4`, `W13`) merged.
 
 **Reference:** Design doc §5.4–§5.5 + Appendix A.1.
 
@@ -411,29 +430,43 @@ Create `.github/template-workflows/ghcr-retention.yml` that runs weekly (cron) a
 
 ---
 
-### Create POC notes skeleton (cicd-poc-notes.md)
+### Create POC notes skeleton (cicd-poc-notes.md) + OIDC smoke-test workflow
 
 **Slot:** `POC` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None
 
 **Context:**
 Phase 0 produces a captured-knowledge document. Phase 2 work depends on values that Phase 0 surfaces (gateway URL, KV secret names, AKS auth mode, etc.). A skeleton lets Phase 0 fill in the blanks without inventing structure.
 
+Phase 0 step 4a ALSO requires a minimal `workflow_dispatch` workflow that exercises `azure/login@v2` + `kubectl get deployments` for every federated-credential subject (branch push, PR sync, tag push, etc.). That workflow is the only repeatable proof the federated credential is correctly configured — operators will want to re-run it whenever federated credentials change. Today the design treats it as throwaway POC scaffolding; this sub-issue captures it as a checked-in artifact instead.
+
 **Task:**
-Create `doc/product/cicd-poc-notes.md` with section headings + placeholders for each Phase 0 gate (0a-0f) and each step. Include an explicit "DO NOT commit secret values" warning at the top.
+1. Create `doc/product/cicd-poc-notes.md` with section headings + placeholders for each Phase 0 gate (0a-0f) and each step. Include an explicit "DO NOT commit secret values" warning at the top.
+2. Create `.github/template-workflows/oidc-smoke-test.yml` — a `workflow_dispatch`-only workflow that authenticates via `azure/login@v2` and runs `az aks get-credentials` + `kubectl get deployments -n osdu`. The workflow itself is the deliverable; running it is Phase 0 step 4a (operator-driven).
 
 **Files:**
 - `doc/product/cicd-poc-notes.md` (new)
+- `.github/template-workflows/oidc-smoke-test.yml` (new)
 
 **Acceptance criteria:**
+
+*POC notes:*
 - [ ] Top-of-file warning: never commit secret values; names, KV references, resource IDs only
 - [ ] Section per gate (0a-0f) with a Question / Finding / Resolution structure
-- [ ] Section per Phase 0 step
+- [ ] Section per Phase 0 step (including step 4a referencing the oidc-smoke-test workflow)
 - [ ] Markdown headings consistent with the rest of `doc/product/`
 - [ ] Linked back to the parent design doc
 
-**Reference:** Design doc §9.1.
+*OIDC smoke-test workflow:*
+- [ ] `workflow_dispatch` only — no `push`/`pull_request` triggers (this is an operator-run tool, not CI)
+- [ ] Inputs: optional `ref` (default `main`) so operators can validate the federated credential against arbitrary refs
+- [ ] `permissions: id-token: write, contents: read`
+- [ ] Steps: `azure/login@v2` → `az aks get-credentials` → `kubectl get deployments -n osdu` (no destructive operations)
+- [ ] On failure, prints which federated-credential subject was being checked and the `azure/login` error message — operators get an immediate "fix the subject claim X" signal
+- [ ] In-file comment documents: "Run this after any federated-credential edit, or to debug 'azure/login fails on branch Y' issues. Phase 0 step 4a uses this workflow."
 
-**Out of scope:** Filling in the actual answers (Phase 0 manual work, run by an operator with cluster access).
+**Reference:** Design doc §9.1 (Phase 0 step 4a).
+
+**Out of scope:** Filling in the actual POC notes answers (Phase 0 manual work, run by an operator with cluster access).
 
 ---
 
@@ -443,6 +476,13 @@ Create `doc/product/cicd-poc-notes.md` with section headings + placeholders for 
 
 **Context:**
 Per §9.4 of the design doc, onboarding a new service fork should be a single command operation. Extending the existing `spi` Python CLI is preferable to a standalone bash script (idempotency, retry logic, JSON handling already exist).
+
+**Reference materials (read before designing — agent has no prior context for this codebase):**
+- Repo layout: `danielscholl-osdu/osdu-spi-stack`
+- Existing `spi` CLI entry points: locate via `grep -rn "def cli\|@click.group\|@app.command" --include='*.py'` in `osdu-spi-stack` — confirm the framework (Click? Typer?) before adding a subcommand
+- Existing subcommands to mirror in style: `spi up`, `spi down`, `spi status`, `spi reconcile`, `spi info` — find their source files; new `spi onboard` should follow the same module pattern, option-naming conventions, and idempotency/retry helpers
+- Existing helpers worth reusing: any `az`/`kubectl`/`gh` wrapper functions, any progress-output helpers, any JSON-emission utilities — onboarding writes a final JSON summary block (§9.4 step 11)
+- **Do not invent a new CLI framework or restructure existing modules** — add the `onboard` subcommand using whatever pattern is already there
 
 **Task:**
 Implement `spi onboard --service <name> --org <org> --aks-cluster <cluster> --aks-rg <rg> --identities-rg <rg>` per §9.4.
@@ -482,9 +522,9 @@ Author `doc/src/adr/032-cicd-deploy-loop-via-suspended-flux.md` per the existing
 - `doc/src/adr/032-cicd-deploy-loop-via-suspended-flux.md` (new)
 
 **Acceptance criteria:**
-- [ ] Follows the structure of existing ADRs
-- [ ] Status: Proposed
-- [ ] References ADR-001 (three-branch) and ADR-015 (template-workflows) for prior context
+- [ ] Follows the structure of existing ADRs (Context, Decision, Consequences, optional Alternatives Considered — terse, bullet form)
+- [ ] **No `Status:` field, no dates, no retrospective content** — ADRs in this repo are mutable Design Records (see `doc/src/adr/learnings.md` and existing ADRs as the structural template; ignore the `## Status` sections in legacy ADRs like 025/031 — those predate the convention)
+- [ ] References ADR-001 (three-branch) and ADR-015 (template-workflows) for prior context (cross-references inline, not in a separate "Related" section)
 - [ ] Renumber if 032 is already taken upstream (`Azure/osdu-spi/doc/src/adr/`)
 
 **Reference:** Design doc Appendix B (ADR-032 draft).
@@ -507,7 +547,8 @@ Author `doc/src/adr/033-ghcr-as-service-image-registry.md`. Content per Appendix
 - `doc/src/adr/033-ghcr-as-service-image-registry.md` (new)
 
 **Acceptance criteria:**
-- [ ] Standard ADR structure
+- [ ] Standard ADR structure (Context, Decision, Consequences, optional Alternatives Considered — terse, bullet form)
+- [ ] **No `Status:` field, no dates, no retrospective content** (ADRs are mutable Design Records; see `doc/src/adr/learnings.md`)
 - [ ] Calls out the compliance question explicitly (public packages allowed under publishing-org policy — Phase 0 gate 0c)
 - [ ] Renumber if needed
 
@@ -531,7 +572,8 @@ Author `doc/src/adr/034-federated-identity-actions-to-azure.md`. Content per App
 - `doc/src/adr/034-federated-identity-actions-to-azure.md` (new)
 
 **Acceptance criteria:**
-- [ ] Standard ADR structure
+- [ ] Standard ADR structure (Context, Decision, Consequences, optional Alternatives Considered — terse, bullet form)
+- [ ] **No `Status:` field, no dates, no retrospective content** (ADRs are mutable Design Records; see `doc/src/adr/learnings.md`)
 - [ ] Lists subjects required (branches wildcard, PR, tags wildcard)
 - [ ] Documents the ~20-step setup cost and the automation response (`spi onboard`)
 - [ ] Renumber if needed
@@ -556,7 +598,8 @@ Author `doc/src/adr/035-azure-only-maven-profile.md`. Content per Appendix B ADR
 - `doc/src/adr/035-azure-only-maven-profile.md` (new)
 
 **Acceptance criteria:**
-- [ ] Standard ADR structure
+- [ ] Standard ADR structure (Context, Decision, Consequences, optional Alternatives Considered — terse, bullet form)
+- [ ] **No `Status:` field, no dates, no retrospective content** (ADRs are mutable Design Records; see `doc/src/adr/learnings.md`)
 - [ ] Documents the trade-off: lose signal on non-Azure provider breakage
 - [ ] Per-service `MAVEN_PROFILE` repo variable is the configuration knob
 - [ ] Renumber if needed
@@ -581,7 +624,8 @@ Author `doc/src/adr/036-workflow-trust-boundaries.md`. Content per Appendix B AD
 - `doc/src/adr/036-workflow-trust-boundaries.md` (new)
 
 **Acceptance criteria:**
-- [ ] Standard ADR structure
+- [ ] Standard ADR structure (Context, Decision, Consequences, optional Alternatives Considered — terse, bullet form)
+- [ ] **No `Status:` field, no dates, no retrospective content** (ADRs are mutable Design Records; see `doc/src/adr/learnings.md`)
 - [ ] Includes the full event-trust table from §5.5
 - [ ] Documents external-fork PR limitation as accepted consequence
 - [ ] Includes the `if:` clause that workflows must use
@@ -648,6 +692,40 @@ Add a `workflow_dispatch` "force-full-pipeline" input to `.github/template-workf
 **Reference:** Design doc §9.3 (W13) + current `template-workflows/validate.yml` lines 41-58 (the paths-ignore block).
 
 **Out of scope:** Removing the paths-ignore rules (they exist for good reason — doc-only changes shouldn't fire CI). Changing the trust boundary clauses (those still apply).
+
+---
+
+### W14: New restore-deployment workflow
+
+**Slot:** `W14` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W3` (consumes `aks-deploy` action)
+
+**Context:**
+§8.9 of the design doc documents a manual `restore-deployment` workflow_dispatch that operators invoke when a bad deploy is contaminating cross-service tests:
+```
+gh workflow run restore-deployment.yml -f service=partition -f digest=sha256:<previous-good>
+```
+W3's `aks-deploy` action emits `previous_digest` precisely so this workflow has a target. Without W14, that output is dead-weight — there is no consumer, and §8.9's restore loop is undeliverable.
+
+**Task:**
+Create `.github/template-workflows/restore-deployment.yml`. The workflow takes a service name and a known-good digest as `workflow_dispatch` inputs and calls `./.github/actions/aks-deploy` to roll the named Deployment back to that digest. Skip docker-build entirely — the image already exists in GHCR.
+
+**Files:**
+- `.github/template-workflows/restore-deployment.yml` (new)
+
+**Acceptance criteria:**
+- [ ] `workflow_dispatch` inputs: `service` (required string — used in run-name and log lines), `digest` (required string, must start with `sha256:`)
+- [ ] Validates digest format at the very first step: regex `^sha256:[a-f0-9]{64}$`; fails with a clear message if the input doesn't match (catches the "double sha256:" foot-gun and typos before kubectl ever runs)
+- [ ] Same trust-boundary protection as deploy: `permissions: id-token: write, contents: read`; federated identity via `azure/login@v2` (composite action already does the login, but workflow must grant the permission)
+- [ ] Per-service concurrency group `spi-stack-${{ inputs.service }}` matching the deploy job's group (per-service, `cancel-in-progress: false`) — prevents racing a restore against an in-flight PR's deploy
+- [ ] Resolves per-service variables (`K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`) and org variables (`K8S_NAMESPACE`, `AKS_RESOURCE_GROUP`, `AKS_CLUSTER_NAME`) identically to the deploy job in `validate.yml`
+- [ ] Composes the image reference as `ghcr.io/${{ github.repository_owner }}/${{ inputs.service }}@${{ inputs.digest }}` and passes it to `aks-deploy` as `image_repository` + `image_digest`
+- [ ] Run-name surfaces the action: `restore ${{ inputs.service }} → ${{ inputs.digest }}` so the Actions UI shows what happened without drilling into logs
+- [ ] Step summary captures: who triggered, which service, which digest, which deployment, and the `aks-deploy` `previous_digest` / `deployed_digest` outputs — for audit
+- [ ] **Hard-blocked from merging until W3 (`aks-deploy` action) merges**
+
+**Reference:** Design doc §8.9 + §5.2 (`aks-deploy` contract).
+
+**Out of scope:** Auto-rollback on test failure (NG5 stands — restores are human-triggered). Capturing the "last known good" externally (W3 captures `previous_digest` per run; operators copy the value from a previous run's logs).
 
 ---
 

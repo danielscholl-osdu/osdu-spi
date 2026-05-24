@@ -506,14 +506,21 @@ The new jobs hold a federated identity with `Azure Kubernetes Service Cluster Us
 
 ```yaml
 if: |
-  needs.check-initialization.outputs.initialized == 'true' &&
-  needs.check-repo-state.outputs.is_java_repo == 'true' &&
-  needs.java-build.outputs.build_result == 'success' &&
-  github.actor != 'dependabot[bot]' &&
-  github.event_name != 'pull_request_target' &&
-  (github.event_name != 'pull_request' ||
-   github.event.pull_request.head.repo.full_name == github.repository)
+  (
+    needs.check-initialization.outputs.initialized == 'true' &&
+    needs.check-repo-state.outputs.is_java_repo == 'true' &&
+    needs.java-build.outputs.build_result == 'success' &&
+    github.actor != 'dependabot[bot]' &&
+    github.event_name != 'pull_request_target' &&
+    (github.event_name != 'pull_request' ||
+     github.event.pull_request.head.repo.full_name == github.repository)
+  ) || (
+    github.event_name == 'workflow_dispatch' &&
+    inputs.force_full_pipeline == true
+  )
 ```
+
+The first half is the trust-boundary admission (per the table above). The second half is the W13 manual escape hatch: a `workflow_dispatch` from an operator who has push access to the repo is, by definition, a trusted invocation — and is the only way to force a full pipeline run when `paths-ignore` would otherwise skip the trigger (the canonical case being a template-sync PR whose only changes are under `.github/`). Both halves must be present; omitting the W13 admission means `force_full_pipeline` lands as dead weight.
 
 For external-fork PRs we accept the reduced safety net: maintainers must do the historical "checkout, build, sanity-test locally" before merge. Documented in CONTRIBUTING.
 
@@ -980,7 +987,7 @@ NG5 ("CI cluster is allowed to remain in a broken state between runs; next run o
 **Mitigations (combined):**
 
 - **Cross-service health probe** (per-service `ACCEPTANCE_TEST_DEPENDENCIES` map declares which dependencies to check, see §5.3 + §7.3): before running tests, GET each dependency's `/info` endpoint. The probe result populates `cluster_state` (`healthy` / `contaminated`) and drives a PR label. **It never changes the job exit code** — required-check semantics (G2) are preserved. See §5.3 exit-code table.
-- **Manual `restore-deployment` workflow** (in scope for v1; modifies NG5): the deploy step captures `previous_digest` before patching. A workflow_dispatch-triggered job lets an operator restore a service to its last-known-good digest:
+- **Manual `restore-deployment` workflow** (in scope for v1; modifies NG5; **implemented by W14** at `.github/template-workflows/restore-deployment.yml`): the deploy step captures `previous_digest` before patching. A workflow_dispatch-triggered job lets an operator restore a service to its last-known-good digest:
   ```
   gh workflow run restore-deployment.yml \
     -f service=partition \
@@ -1004,13 +1011,15 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 **Scope:** Use existing `danielscholl-osdu/partition` fork and existing spi-stack cluster. No engineering system changes.
 
-**Step 0 — Prerequisites** (settle before any other Phase 0 step; each is a binary gate):
+**Step 0 — Prerequisites** (settle before any other Phase 0 step; each is a binary gate).
+
+> **Run 0c FIRST**, before anything else in Phase 0 — including before booting up the manual deploy loop. Gate 0c (Azure org policy on public GHCR packages) is an email-and-meeting conversation, not engineering work. If the answer is "no public packages," §7.4 fallback A (ACR + AcrPull) or B (private GHCR + per-fork imagePullSecret) replaces D4 — which restructures W2, W3, and ONBOARD. Discovering that after Wave B agents have shipped composite actions is the largest avoidable rework in this plan. Spend a day waiting for an answer; save a week of rework.
 
 | # | Check | Why it gates | Blocks |
 |---|---|---|---|
+| **0c** | **(RUN FIRST)** Confirm Azure org policy permits public GHCR packages for the publishing org. For `danielscholl-osdu` sandbox: OK. For `Azure/osdu-spi`-derived production: get explicit sign-off. | If disallowed, design switches to §7.4 fallback A or B — this changes the shape of W2, W3, ONBOARD. | **W2 finalization** (registry choice), **W3 finalization** (pull-auth path), **ONBOARD finalization** (visibility step or pull-secret step), **Phase 4 PR back to upstream** (compliance sign-off required pre-merge) |
 | 0a | Confirm Helm chart materializes `Deployment/<name>` in `osdu` namespace for partition. Capture the exact `metadata.name` and container name. | If the chart names resources unpredictably, `kubectl set image deployment/partition` won't find anything (C5/D13). | **W3 merge** (action assumes specific naming) |
 | 0b | Confirm AKS auth mode (Entra-managed vs. local-accounts-disabled vs. WI SA). | Drives the RoleBinding form in §6.1 step 3. | **W3 merge** (action's RBAC binding form), **ONBOARD merge** (script's RBAC step) |
-| 0c | Confirm Azure org policy permits public GHCR packages for the publishing org. For `danielscholl-osdu` sandbox: OK. For `Azure/osdu-spi`-derived production: get explicit sign-off. | If disallowed, design switches to §7.4 fallback A or B. | **Phase 4 PR back to upstream** (compliance sign-off required pre-merge) |
 | 0d | Confirm gateway URL stability — is the DNS owned and stable, or does it change on cluster re-provisioning? | A regenerable gateway URL means every fork's `GATEWAY_URL` var is a moving target. | **W4 merge** (integration-test consumes the URL) |
 | 0e | Capture partition's acceptance-test data isolation strategy (does it use unique prefixes? clean up?). | Feeds §8.8 audit. If isolation is weak, partition's CI uses cluster-wide concurrency lock instead of per-service. | **W4 merge** (action's concurrency wiring and `cluster_state` semantics depend on the answer) |
 | 0f | Verify operator has the RBAC required by the onboarding script (§6.1 preconditions). | If the operator can't create identities or write secrets to the repo, Phase 3 is blocked. | **ONBOARD merge** (script's preconditions check is meaningless if there's no test environment) |
@@ -1043,7 +1052,7 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 4. **Manually provision managed identity** for `danielscholl-osdu/partition` per §6.1 steps 1-5. Use the RoleBinding form determined by step 0b.
 
-4a. **Validate the OIDC path end-to-end** (new — was missing from prior plan). Author a minimal `workflow_dispatch` workflow on the partition fork that exercises only `azure/login@v2` + `az aks get-credentials` + `kubectl get deployments -n osdu`:
+4a. **Validate the OIDC path end-to-end.** Use the checked-in `.github/template-workflows/oidc-smoke-test.yml` workflow (delivered by the `POC` sub-issue) that exercises only `azure/login@v2` + `az aks get-credentials` + `kubectl get deployments -n osdu`:
    ```yaml
    - uses: azure/login@v2
      with:
@@ -1054,6 +1063,8 @@ The work is sequenced in five phases, with explicit exit criteria for each.
    - run: kubectl get deployments -n osdu
    ```
    Run from each federated-credential subject we'll need at production: dispatch on `main`, on a feature branch via push, via PR open, and (when release flow lands) on a tag push. Each one that fails surfaces a missing or mismatched federated credential — fix before W2/W3 are written.
+
+   **The workflow is a checked-in artifact, not a throwaway.** Re-run it any time federated credentials are edited (subject claims added, rotated identities, etc.). It's the only repeatable proof the credential is correctly configured.
 
 5. **Cluster CI-mode:**
    ```
@@ -1135,6 +1146,7 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 | W11 | Image-retention scheduled workflow | New `.github/template-workflows/ghcr-retention.yml` runs weekly, deletes GHCR tags per §8.5 policy. |
 | W12 | GHCR-visibility verification step | Step inside `docker-build` action that checks the package is public; fails the job (with a clear error pointing at onboarding script) if not. |
 | W13 | Add `workflow_dispatch` "force-full-pipeline" path to validate.yml | Today `validate.yml` `paths-ignore` excludes `.github/actions/**` and `.github/template-workflows/**`. That means template-sync PRs whose ONLY change is workflow/action files **do not trigger validate.yml**, breaking the sandbox→partition iteration loop. Fix: add a `workflow_dispatch` input that forces the new deploy/test stages to run against the current HEAD regardless of paths-ignore, so the operator can manually trigger a verification run after each template-sync. Document the trigger explicitly in W5 acceptance criteria. |
+| W14 | New `template-workflows/restore-deployment.yml` workflow | Consumes W3's `previous_digest` output (or any known-good digest copied from a prior run's logs). `workflow_dispatch` with `service` + `digest` inputs; validates digest format; same trust-boundary protection and per-service concurrency as the deploy job; calls `aks-deploy` directly with the supplied digest. Without W14, `previous_digest` is dead-weight and §8.9's restore loop is undeliverable. |
 
 **Per work item:** PR in sandbox → template-sync pushes to partition → operator manually triggers `validate.yml` via `workflow_dispatch` on partition (because template-sync changes are paths-ignored) → debug → iterate.
 
@@ -1329,6 +1341,7 @@ Questions that have been resolved by this design pass are listed with their reso
 | Q3 | Does the existing spi-stack RG have a dedicated identities RG, or do we create one? | User | Step 0f / step 4 |
 | Q5 | Per-service Maven profile names — is it always `<service>-azure`? | Inspect each fork during Phase 5 (partition known: `partition-azure`) | Captured as `MAVEN_PROFILE` repo variable during onboarding |
 | Q8 | Are integration tests fast enough to run on every PR (<10min)? | Measured in Phase 0 step 7 (partition); each service measures during Phase 5 onboarding | Step 7 |
+| Q8-contingency | **If runtime exceeds budget**, the documented fallback (do not redesign the pipeline; pick one): (**a**) per-PR runs a tagged smoke subset via Maven `-Dgroups=...` (or surefire `<includes>`), full suite runs on merge-to-main as a separate non-blocking workflow; (**b**) per-PR deploy + sample probe (a handful of API calls against gateway), full suite runs nightly on a scheduled workflow. Decision is per-service — partition may afford (a), a slower service may need (b). | Operator at Phase 5 onboarding time | Captured in `cicd-poc-notes.md` per service |
 | **Q9 (new)** | What AKS auth mode is the spi-stack cluster using (Entra-managed, local-accounts-disabled, Workload Identity SA passthrough)? Determines K8s RoleBinding syntax. | User / inspect cluster | Step 0b |
 | **Q10 (new)** | Does the Azure org policy permit public GHCR packages for production publishing? (Sandbox org is fine.) | User / Azure security contact | Step 0c, blocks Phase 4 |
 | **Q11 (new)** | Is the gateway URL stable across cluster re-provisioning, or DNS-regenerated? | User | Step 0d |
@@ -1348,13 +1361,18 @@ Questions that have been resolved by this design pass are listed with their reso
     name: "🐳 Docker Build"
     needs: [check-initialization, check-repo-state, java-build]
     if: |
-      needs.check-repo-state.outputs.is_initialized == 'true' &&
-      needs.check-repo-state.outputs.is_java_repo == 'true' &&
-      needs.java-build.outputs.build_result == 'success' &&
-      github.actor != 'dependabot[bot]' &&
-      github.event_name != 'pull_request_target' &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+      (
+        needs.check-repo-state.outputs.is_initialized == 'true' &&
+        needs.check-repo-state.outputs.is_java_repo == 'true' &&
+        needs.java-build.outputs.build_result == 'success' &&
+        github.actor != 'dependabot[bot]' &&
+        github.event_name != 'pull_request_target' &&
+        (github.event_name != 'pull_request' ||
+         github.event.pull_request.head.repo.full_name == github.repository)
+      ) || (
+        github.event_name == 'workflow_dispatch' &&
+        inputs.force_full_pipeline == true
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1668,37 +1686,34 @@ Note the `cluster_state` output drives a PR label downstream (see §5.3 exit-cod
 
 ### Appendix B — Draft ADRs
 
+> **ADR convention reminder.** ADRs in `doc/src/adr/` are mutable Design Records — no `Status:` field, no dates, no retrospective content. The drafts below show Context / Decision / Consequences only. Agents authoring these as files in `doc/src/adr/` should match the structure of an existing ADR (e.g. `031-template-sync-duplicate-prevention.md`) for sectioning, but **omit the `## Status` section** even though legacy ADRs include one.
+
 **ADR-032: CI/CD Deploy Loop via Suspended Flux**
 
-> **Status:** Proposed  
-> **Context:** The OSDU SPI engineering system produces validated Maven artifacts but no container images, deployments, or integration test signal. The runtime infrastructure (osdu-spi-stack) uses Flux GitOps for production-style reconciliation but this is incompatible with a per-PR CI cadence that needs to mutate deployments freely.  
-> **Decision:** Run the shared osdu-spi-stack cluster with Flux fully suspended for the duration of CI/CD operation. Per-PR workflows use `kubectl set image` directly on Deployments to swap in newly-built container images, then run acceptance tests against the live service. Flux is only resumed during planned cluster baseline refresh.  
+> **Context:** The OSDU SPI engineering system produces validated Maven artifacts but no container images, deployments, or integration test signal. The runtime infrastructure (osdu-spi-stack) uses Flux GitOps for production-style reconciliation but this is incompatible with a per-PR CI cadence that needs to mutate deployments freely.
+> **Decision:** Run the shared osdu-spi-stack cluster with Flux fully suspended for the duration of CI/CD operation. Per-PR workflows use `kubectl set image` directly on Deployments to swap in newly-built container images, then run acceptance tests against the live service. Flux is only resumed during planned cluster baseline refresh.
 > **Consequences:** (+) Per-PR cadence achievable with sub-minute deploy latency. (+) No race conditions with Flux reconciliation. (+) Simple deploy mechanism, no Helm dynamics in CI. (-) Cluster state drifts from declared HelmRelease state. (-) Requires explicit ops awareness of "CI mode." (-) Operators cannot rely on Flux to self-heal during CI cycles.
 
 **ADR-033: GHCR as Service Image Registry**
 
-> **Status:** Proposed  
-> **Context:** SPI service Docker images need to be hosted in a registry that GH Actions can push to with no extra auth, and AKS can pull from. Candidates: ACR, GHCR.  
-> **Decision:** Use GHCR with packages set to public visibility. Push via `GITHUB_TOKEN`, pull anonymously from AKS.  
+> **Context:** SPI service Docker images need to be hosted in a registry that GH Actions can push to with no extra auth, and AKS can pull from. Candidates: ACR, GHCR.
+> **Decision:** Use GHCR with packages set to public visibility. Push via `GITHUB_TOKEN`, pull anonymously from AKS.
 > **Consequences:** (+) No image-pull-secret provisioning in cluster. (+) No cross-cloud auth wiring. (+) Free storage for public packages. (-) Image visibility tied to package settings — accidental private setting breaks pulls. (-) Not co-located with cluster (negligible latency in practice).
 
 **ADR-034: Federated Identity for Actions → Azure**
 
-> **Status:** Proposed  
-> **Context:** GH Actions workflows need authenticated access to Azure (AKS, Key Vault) to deploy and run integration tests. Static credentials (`AZURE_CREDENTIALS` JSON) are deprecated and a security risk.  
-> **Decision:** Per service fork, provision a User-Assigned Managed Identity with federated credentials for the fork's GitHub Actions OIDC token. Workflows use `azure/login@v2` with the identity's client ID. No static secrets stored in GitHub.  
+> **Context:** GH Actions workflows need authenticated access to Azure (AKS, Key Vault) to deploy and run integration tests. Static credentials (`AZURE_CREDENTIALS` JSON) are deprecated and a security risk.
+> **Decision:** Per service fork, provision a User-Assigned Managed Identity with federated credentials for the fork's GitHub Actions OIDC token. Workflows use `azure/login@v2` with the identity's client ID. No static secrets stored in GitHub.
 > **Consequences:** (+) No long-lived secrets. (+) Per-fork blast radius — compromise of one fork's CI doesn't affect others. (-) ~20 setup steps per fork; automation required. (-) Federated subject claim must match exactly; debugging mismatches is tedious.
 
 **ADR-035: Azure-Only Maven Profile Restriction**
 
-> **Status:** Proposed  
-> **Context:** Forked OSDU services contain multiple cloud provider profiles (AWS, Azure, IBM, GC, Core+, GC-Quarkus). Only Azure is relevant to SPI work; building others is wasted CPU and irrelevant unit-test signal.  
-> **Decision:** Configure the engineering system's Maven build to use `-P <service>-azure` profile only. Profile name is a per-fork variable.  
+> **Context:** Forked OSDU services contain multiple cloud provider profiles (AWS, Azure, IBM, GC, Core+, GC-Quarkus). Only Azure is relevant to SPI work; building others is wasted CPU and irrelevant unit-test signal.
+> **Decision:** Configure the engineering system's Maven build to use `-P <service>-azure` profile only. Profile name is a per-fork variable.
 > **Consequences:** (+) Faster builds (~3-5x reduction in modules built). (+) Unit-test results are 100% Azure-relevant. (-) Lose signal on whether upstream changes break other providers — acceptable since SPI doesn't ship those.
 
 **ADR-036: Workflow Trust Boundaries for CI/CD with Cluster Credentials**
 
-> **Status:** Proposed
 > **Context:** The new docker-build/deploy/integration-test jobs hold a federated identity with `Azure Kubernetes Service Cluster User`, namespaced `edit` on the shared `osdu` namespace, and `Key Vault Secrets User`. The default GitHub Actions trigger surface (especially `pull_request_target`, but also dependabot PRs and external-fork PRs) can place attacker-controlled code in a context that has access to repo secrets. Running the new jobs in those contexts would expose the cluster federated identity to attacker code, risking compromise across all 8 forks.
 > **Decision:** The new jobs run only when **all** of the following hold:
 > - Event is `push` to a protected branch, OR `pull_request` from a head repo equal to the base repo, OR `workflow_dispatch`, OR a tag push.
