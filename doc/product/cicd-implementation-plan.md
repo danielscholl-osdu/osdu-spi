@@ -63,6 +63,7 @@ graph TD
         W13["W13<br/>workflow_dispatch<br/>force-full-pipeline"]:::batch1
         POC["POC<br/>POC skeleton"]:::batch1
         ONBOARD["ONBOARD<br/>spi onboard CLI<br/>(cross-repo)"]:::batch1
+        ONBOARD_INIT["ONBOARD-INIT<br/>extend init.yml<br/>(GHCR + ruleset + vars)"]:::batch1
         ADR32["ADR-032"]:::adr
         ADR33["ADR-033"]:::adr
         ADR34["ADR-034"]:::adr
@@ -106,7 +107,7 @@ Spawn agents in waves to avoid review overload. Each wave is fully parallel inte
 | **A — ground the design** | `ADR-032`, `ADR-033`, `ADR-034`, `ADR-035`, `ADR-036`, `POC` | Docs-only; reviewers reading these understand decisions before judging the code waves |
 | **B — composite actions** | `W1`, `W2`, `W3`, `W4`, `W8` | The substantive code; review for design adherence |
 | **C — plumbing + specs** | `W7`, `W10`, `W11`, `W13`, `SPECS` | Lighter scope; runs parallel with Wave B. `W13` and `W5` both touch `validate.yml` — `W13` lands first so `W5` can reference its `workflow_dispatch` input |
-| **D — cross-repo** | `ONBOARD` | Different repo (`osdu-spi-stack`); no contention with anything else |
+| **D — onboarding split** | `ONBOARD` (cross-repo), `ONBOARD-INIT` (this repo) | Phase 3 split along the credential boundary (design §9.4). `ONBOARD` lands the cluster-side grants in `osdu-spi-stack`; `ONBOARD-INIT` extends this repo's `init.yml` for GHCR + ruleset + per-service vars. No contention between them. |
 | **Final — wire it together** | `W5`, `W14` | `W5` blocked by Wave B (`W1`, `W2`, `W3`, `W4`) and `W13`. `W14` blocked by `W3` (consumes `aks-deploy`). |
 
 **Phase 0 runs in parallel with all waves**, human-driven. Gate findings may trigger small revisions to Wave B (e.g., Gate 0b might flip `W3`'s RoleBinding form). Plan for that — it's normal, not a setback.
@@ -127,7 +128,8 @@ The 19 sub-issues as currently filed on this fork (`danielscholl-osdu/osdu-spi`)
 | `W11` | [#9](https://github.com/danielscholl-osdu/osdu-spi/issues/9) | S | W11: GHCR retention scheduled workflow |
 | `W8` | [#10](https://github.com/danielscholl-osdu/osdu-spi/issues/10) | S | W8: New cluster-health-check composite action |
 | `POC` | [#11](https://github.com/danielscholl-osdu/osdu-spi/issues/11) | XS | Create POC notes skeleton (cicd-poc-notes.md) |
-| `ONBOARD` | [#12](https://github.com/danielscholl-osdu/osdu-spi/issues/12) | L | Phase 3: Extend spi CLI with 'onboard' subcommand (cross-repo) |
+| `ONBOARD` | [#12](https://github.com/danielscholl-osdu/osdu-spi/issues/12) | M | Phase 3 (cluster-side): Add `spi onboard` subcommand — grant a repo permission to deploy |
+| `ONBOARD-INIT` | _(to be created)_ | S | Phase 3 (fork-side): Extend `init.yml` / init-helpers for CI/CD onboarding |
 | `ADR-032` | [#13](https://github.com/danielscholl-osdu/osdu-spi/issues/13) | XS | ADR-032: Author 'CI/CD Deploy Loop via Suspended Flux' |
 | `ADR-033` | [#14](https://github.com/danielscholl-osdu/osdu-spi/issues/14) | XS | ADR-033: Author 'GHCR as Service Image Registry' |
 | `ADR-034` | [#15](https://github.com/danielscholl-osdu/osdu-spi/issues/15) | XS | ADR-034: Author 'Federated Identity for Actions to Azure' |
@@ -184,7 +186,7 @@ The action:
 - Logs into GHCR via `GITHUB_TOKEN`
 - Computes tags: `:sha-<short>` always, `:<branch>-snapshot` on push, `:<version>` on tag push
 - Builds and pushes via `docker/build-push-action@v6` with GHA layer cache
-- Verifies the resulting GHCR package is public; fails with a clear error pointing to the onboarding script if private
+- Verifies the resulting GHCR package is public; fails with a clear error directing operators to re-dispatch `init.yml` (Phase 3 `ONBOARD-INIT`) to flip visibility
 
 **Files:**
 - `.github/actions/docker-build/action.yml` (new)
@@ -195,7 +197,7 @@ The action:
 - [ ] Tag computation matches §5.1 + Appendix A.2 (immutable `:sha-*`, branch-snapshot on push, semver on tag push)
 - [ ] GHA cache wired (`cache-from: type=gha, cache-to: type=gha,mode=max`)
 - [ ] Visibility check step uses the **org-package** endpoint (`/orgs/{owner}/packages/container/{name}`) when `${{ github.repository_owner }}` is an Organization, and the user-package endpoint (`/users/{owner}/packages/container/{name}`) otherwise. Discriminate via `gh api /users/{owner} --jq '.type'`. See §7.4
-- [ ] Visibility check fails the job with a clear message pointing at the onboarding script if package is private
+- [ ] Visibility check fails the job with a clear message directing operators to re-dispatch `init.yml` (Phase 3 `ONBOARD-INIT`) if package is private
 - [ ] No hardcoded secrets
 
 **Reference:** Design doc §5.1 + Appendix A.2 + §7.4 + §9.3 W2/W12.
@@ -470,41 +472,82 @@ Phase 0 step 4a ALSO requires a minimal `workflow_dispatch` workflow that exerci
 
 ---
 
-### Phase 3: Extend spi CLI with 'onboard' subcommand (cross-repo)
+### Phase 3 (cluster-side): Add `spi onboard` subcommand — grant a repo permission to deploy
 
-**Slot:** `ONBOARD` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `L` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi-stack`
+**Slot:** `ONBOARD` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi-stack`
 
 **Context:**
-Per §9.4 of the design doc, onboarding a new service fork should be a single command operation. Extending the existing `spi` Python CLI is preferable to a standalone bash script (idempotency, retry logic, JSON handling already exist).
+Per §9.4 of the design doc, Phase 3 splits along the credential boundary: this half owns cluster-side IAM grants (managed identity, federated credentials, AKS/KV RBAC, K8s RoleBinding) plus writing the three `AZURE_*` handoff secrets onto the target repo. Fork-side GHCR/ruleset/per-service-var setup lives in `osdu-spi`'s `init.yml` (see `ONBOARD-INIT`).
+
+**Reframe vs. earlier scope:** Previously this slot tried to do everything (cluster-side IAM *and* fork-side GHCR/ruleset/vars). The earlier framing conflated two responsibilities. The fork-side work has moved to `ONBOARD-INIT`, where it belongs — alongside the existing `init.yml` that already configures branches, rulesets, and labels.
 
 **Reference materials (read before designing — agent has no prior context for this codebase):**
 - Repo layout: `danielscholl-osdu/osdu-spi-stack`
 - Existing `spi` CLI entry points: locate via `grep -rn "def cli\|@click.group\|@app.command" --include='*.py'` in `osdu-spi-stack` — confirm the framework (Click? Typer?) before adding a subcommand
 - Existing subcommands to mirror in style: `spi up`, `spi down`, `spi status`, `spi reconcile`, `spi info` — find their source files; new `spi onboard` should follow the same module pattern, option-naming conventions, and idempotency/retry helpers
-- Existing helpers worth reusing: any `az`/`kubectl`/`gh` wrapper functions, any progress-output helpers, any JSON-emission utilities — onboarding writes a final JSON summary block (§9.4 step 11)
+- Existing helpers worth reusing: any `az`/`kubectl`/`gh` wrapper functions, any progress-output helpers, any JSON-emission utilities — onboarding writes a final JSON summary block (§9.4.A step 9)
 - **Do not invent a new CLI framework or restructure existing modules** — add the `onboard` subcommand using whatever pattern is already there
 
 **Task:**
-Implement `spi onboard --service <name> --org <org> --aks-cluster <cluster> --aks-rg <rg> --identities-rg <rg>` per §9.4.
+Implement `spi onboard --service <name> --repo <org/repo> --aks-cluster <cluster> --aks-rg <rg> --identities-rg <rg>` per §9.4.A.
 
 **Acceptance criteria:**
 - [ ] Operator precondition checks (az/kubectl/gh authentication + RBAC) — fail fast with remediation messages
 - [ ] Verifies `Deployment/<name>` exists in `osdu`; captures `K8S_DEPLOYMENT_NAME` and `K8S_CONTAINER_NAME`
-- [ ] Creates managed identity (idempotent)
-- [ ] Adds federated credentials for branches (wildcard if supported, else explicit), PR, tags
+- [ ] Creates User-Assigned Managed Identity in the identities RG (idempotent)
+- [ ] Adds federated credentials for the target repo: branches (wildcard if supported, else explicit), PR, tags
 - [ ] AKS Cluster User assignment + **least-privilege custom Role** (`spi-ci-${service}-deploy` with patch on the named Deployment + read pods/replicasets/events/logs, per §6.1 step 3 manifest — NOT the built-in `edit` ClusterRole) + read-only Role binding in `flux-system` for Kustomization checks. RoleBinding subject form depends on AKS auth mode (Phase 0 gate 0b)
 - [ ] Key Vault Secrets User assignment
-- [ ] **Flips GHCR package to public using the correct endpoint based on owner type:** `/orgs/{owner}/packages/...` for organizations, `/user/packages/...` (or `/users/{owner}/...` for cross-user reads) for personal accounts. Discriminate with `gh api /users/{owner} --jq '.type'` (returns `Organization` or `User`). See §7.4
-- [ ] Sets GHCR retention policy per §8.5
-- [ ] Writes GitHub repo secrets and per-service variables (per §7.3 table, including the new `ACCEPTANCE_TEST_DEPENDENCIES`)
-- [ ] Updates branch-protection ruleset on the target repo
+- [ ] Writes the three handoff secrets to the target repo via `gh secret set`: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
+- [ ] Writes the captured cluster-side repo variables via `gh variable set`: `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`
 - [ ] `--dry-run` mode prints the plan without making changes
-- [ ] Outputs a JSON summary on completion
+- [ ] Outputs a JSON summary on completion: identity object ID, secrets written, variables emitted, KV secret names operator still needs to populate, **a reminder to re-dispatch `init.yml` on the target fork so `ONBOARD-INIT` can complete the fork-side work (GHCR + ruleset + per-service vars)**
 - [ ] **Hard-blocked from production use until Phase 0 gates 0b (AKS auth mode) and 0f (operator RBAC) are closed.** Scaffolding the CLI command is fine; running it against a fork requires those answers
 
-**Reference:** Design doc §6.1 + §7.3 + §7.4 + §9.4.
+**Out of scope (handled by `ONBOARD-INIT` in `osdu-spi`):**
+- GHCR package visibility flip + retention policy
+- Branch-protection ruleset update on the target repo
+- Per-service workflow variables for tests (`MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`)
+- Populating per-service Key Vault secret *values* (separate manual step, out of band)
 
-**Out of scope:** Populating per-service KV secret values (separate manual step, out of band).
+**Reference:** Design doc §6.1 + §7.3 + §7.4 + §9.4.A.
+
+---
+
+### Phase 3 (fork-side): Extend `init.yml` / init-helpers for CI/CD onboarding
+
+**Slot:** `ONBOARD-INIT` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi` (this repo)
+
+**Context:**
+Per §9.4.B of the design doc, the fork side of onboarding owns everything that configures the new repo itself. `init.yml` already configures branches, rulesets, security, sync, and labels via the helpers under `.github/local-actions/init-helpers/`. Extend it to also handle the new CI/CD prerequisites so "Use this template" + first push remains the single GitHub-side action.
+
+This pairs with `ONBOARD` (cluster-side) in `osdu-spi-stack`. The two halves handshake via three secrets (`AZURE_*`) and two repo variables (`K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`) that `ONBOARD` writes; everything else stays repo-local.
+
+**Task:**
+Extend `init.yml` (and add helpers under `.github/local-actions/init-helpers/`) to perform the four steps below. Re-dispatching `init.yml` is idempotent and is the documented recovery path after `spi onboard` runs late.
+
+**Files:**
+- `.github/workflows/init.yml` (extend — wire new steps)
+- `.github/local-actions/init-helpers/setup-ghcr-visibility.sh` (new)
+- `.github/local-actions/init-helpers/setup-branch-protection.sh` (extend — add new required checks)
+- `.github/local-actions/init-helpers/setup-service-variables.sh` (new — per-service variables)
+- `.github/local-actions/init-helpers/check-azure-secrets.sh` (new — secret presence + actionable comment)
+
+**Acceptance criteria:**
+- [ ] **GHCR visibility flip + retention**: Uses the org-package endpoint (`/orgs/{owner}/packages/...`) when `${{ github.repository_owner }}` is an Organization, the user-package endpoint otherwise. Discriminate via `gh api /users/{owner} --jq '.type'`. Sets retention per §8.5 (`:sha-*` 30d, `:<branch>-snapshot` last 5, `:<version>` indefinite). Skips silently if the package doesn't exist yet (first `docker-build` will create it; init.yml is re-dispatched after that)
+- [ ] **Branch-protection extension**: existing `setup-branch-protection.sh` updated to require the three new checks (`docker-build`, `deploy`, `integration-test`) on the protected branches once the workflow exists. Reads expected check names from a single source (e.g., a constant or variable) so renames don't drift
+- [ ] **Per-service variable bootstrap**: `setup-service-variables.sh` reads operator-supplied per-service variables from `init.yml` inputs (or from repo variables set out of band) and writes them to the repo: `SERVICE_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`. Defaults are documented (e.g., `ACCEPTANCE_TEST_DIR` defaults to `<service>-acceptance-test`); required values fail the init job loudly with a clear message naming which input is missing
+- [ ] **`AZURE_*` secret presence check**: `check-azure-secrets.sh` checks for `AZURE_CLIENT_ID`. If absent, posts an actionable comment on the initialization issue created by `init.yml`: *"Cluster-side onboarding has not run for this repo yet. From a workstation with Azure + GitHub auth, run: `uv run spi onboard --service <name> --repo <org>/<repo>` in osdu-spi-stack. Then re-dispatch this init workflow."* — does NOT fail init (this is a soft handshake; the comment is the operator-facing recovery path)
+- [ ] Re-dispatching `init.yml` after operator action is idempotent (no duplicate GHCR patches, no overwritten variables unless `--force` analog is provided)
+- [ ] No secret values logged at any step
+- [ ] `init.yml`'s existing happy path (template-fresh fork) still succeeds end-to-end with all five behaviours layered in
+
+**Reference:** Design doc §7.3 (variable ownership table) + §7.4 (GHCR endpoint discrimination) + §8.5 (retention policy) + §9.4.B (full deliverable spec).
+
+**Out of scope:**
+- Cluster-side IAM (handled by `ONBOARD` in `osdu-spi-stack`)
+- Populating per-service KV secret *values* (separate manual step, out of band)
+- W11 scheduled retention workflow — that's a recurring sweep, not first-time setup
 
 ---
 
@@ -575,7 +618,7 @@ Author `doc/src/adr/034-federated-identity-actions-to-azure.md`. Content per App
 - [ ] Standard ADR structure (Context, Decision, Consequences, optional Alternatives Considered — terse, bullet form)
 - [ ] **No `Status:` field, no dates, no retrospective content** (ADRs are mutable Design Records; see `doc/src/adr/learnings.md`)
 - [ ] Lists subjects required (branches wildcard, PR, tags wildcard)
-- [ ] Documents the ~20-step setup cost and the automation response (`spi onboard`)
+- [ ] Documents the ~20-step setup cost and the automation response, split along the credential boundary: `spi onboard` (cluster-side IAM) + extended `init.yml` (fork-side GHCR/ruleset/vars) — see §9.4 of the design doc
 - [ ] Renumber if needed
 
 **Reference:** Design doc Appendix B + §6.

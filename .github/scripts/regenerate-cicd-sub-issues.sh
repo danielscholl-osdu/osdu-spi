@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerate the 17 CI/CD sub-issues from doc/product/cicd-implementation-plan.md
+# Regenerate the CI/CD sub-issues from doc/product/cicd-implementation-plan.md
 #
 # Usage:
 #   .github/scripts/regenerate-cicd-sub-issues.sh \
