@@ -811,7 +811,27 @@ gh api "/orgs/${ORG}/packages/container/${SERVICE}" \
 | **A. ACR + AcrPull on kubelet** | Push to existing `osdu-spi-stack` ACR; AKS kubelet identity already has AcrPull via stack provisioning | Best fit if Azure org policy forbids public images; requires push-to-ACR federated identity instead of `GITHUB_TOKEN`; cross-cloud auth wiring |
 | **B. Private GHCR + per-fork image-pull-secret** | Keep GHCR but provision `regcred` Secret in `osdu` namespace per service | Adds onboarding step; brings back the very thing D4 wanted to avoid; secret rotation becomes an operational concern |
 
-Decision deferred until Azure org policy is confirmed (Phase 0 compliance check).
+**Decision (sandbox + danielscholl-osdu phase):** proceed with public GHCR per D4. Observable Azure-org precedent (next subsection) confirms the pattern; no upstream blocker on sandbox work. Upstream review at Phase 4 may pivot to MCR — that swap stays localized for MCR or ACR; private-GHCR fallback is broader-touch (see *"Migration-swap scope"* below).
+
+**Future migration: Microsoft Container Registry (MCR).**
+
+Microsoft's published container-publishing policy states: *"The Microsoft Container Registry (MCR) team owns the publishing systems for Docker containers. Do not post containers to GitHub Container Registry, GitHub Packages, or DockerHub directly."* Onboarding is via `aka.ms/mcr/onboarding`.
+
+The policy is in tension with observable practice — the `github.com/Azure` org has 300+ public GHCR container packages including high-traffic projects (Eraser, Azure Workload Identity, Azure Developer CLI, Kubelogin, AKS-MCP). The practical reading is that the MCR mandate applies to **customer-shipped product containers**, while developer-tooling, CI, and test-loop containers commonly land on GHCR. The OSDU SPI service containers built by this design are CI artifacts (test-loop images consumed by the shared `spi-stack` AKS cluster), not customer-shipped product images — they fit the observed GHCR-acceptable pattern.
+
+**Current scope (this design):** sandbox + reference fork (`danielscholl-osdu/*`) publish to public GHCR per D4. No MCR involvement.
+
+**Future scope (post-upstream-to-Azure):** if and when these images move from "CI test artifacts" to "containers that customers or production OSDU deployments consume," the registry choice should be revisited against MCR policy.
+
+**Migration-swap scope** (which components a future registry pivot touches):
+
+| Target | Cluster-side changes? | Components touched |
+|---|---|---|
+| **MCR (anonymous pull)** | No | `W2` (push target), `ONBOARD-INIT-A` (visibility step becomes no-op), `SETTINGS-APPLY`'s `reconcile-ghcr-visibility.sh` (retired or repointed). `W3`/`W4`/`W5b`/`W8`/`ONBOARD` unchanged |
+| **ACR + AcrPull on kubelet** (§7.4 Option A) | No | Same components as MCR — kubelet identity already has AcrPull via stack provisioning, so cluster-side is untouched |
+| **Private GHCR + per-fork imagePullSecret** (§7.4 Option B) | **Yes** | All of the above, **plus** per-service `regcred` Secrets in the `osdu` namespace, chart-level `imagePullSecrets:` wiring in `osdu-spi-stack`, and a Secret-provisioning step in `ONBOARD` (cluster-side IAM CLI). Onboarding gains a secret-rotation concern |
+
+The **MCR and ACR paths are the localized swaps** — they touch only fork-side push/visibility logic. **Option B is broader-touch** and should be picked only if neither MCR nor ACR is viable.
 
 ### 7.5 Cluster CI-mode invariants
 
@@ -1004,7 +1024,7 @@ A "service health badge" surfaced on the spi-stack repo README, updated by a 5-m
 
 The work is sequenced in five phases, with explicit exit criteria for each.
 
-**Upstream PR boundaries.** Phase 4 ships to `Azure/osdu-spi` as **two** sequenced PRs cut along the credential boundary (see §5.5, ADR-036). the Build PR ships the build path — everything that runs under `GITHUB_TOKEN` and pushes to GHCR, gated only by Phase 0 gate 0c. the Deploy PR ships the deploy + integration-test path on top, gated by Phase 0 gates 0a/0b/0d/0e/0f. This sequence lets service forks pick up image-build capability via template-sync as soon as the Build PR lands, so Phase 5 rollout can begin before deploy/test are upstream. See §9.5 for the cut and §9.6 for the rollout entry condition.
+**Upstream PR boundaries.** Phase 4 ships to `Azure/osdu-spi` as **two** sequenced PRs cut along the credential boundary (see §5.5, ADR-036). the Build PR ships the build path — everything that runs under `GITHUB_TOKEN` and pushes to GHCR. **Gate 0c is resolved for the sandbox + danielscholl-osdu phase** (public GHCR proceeds per §7.4). Upstream review at the Build PR submission may surface MCR per Microsoft's container policy; the swap is localized to W2 / ONBOARD-INIT-A / SETTINGS-APPLY's visibility helper for MCR or ACR paths (broader for private-GHCR + imagePullSecret — see §7.4 *"Migration-swap scope"*). The Deploy PR ships the deploy + integration-test path on top, gated by Phase 0 gates 0a/0b/0d/0e/0f. This sequence lets service forks pick up image-build capability via template-sync as soon as the Build PR lands, so Phase 5 rollout can begin before deploy/test are upstream. See §9.5 for the cut and §9.6 for the rollout entry condition.
 
 ### 9.1 Phase 0 — Manual Proof of Concept
 
@@ -1015,11 +1035,11 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 **Step 0 — Prerequisites** (settle before any other Phase 0 step; each is a binary gate).
 
-> **Run 0c FIRST**, before anything else in Phase 0 — including before booting up the manual deploy loop. Gate 0c (Azure org policy on public GHCR packages) is an email-and-meeting conversation, not engineering work. If the answer is "no public packages," §7.4 fallback A (ACR + AcrPull) or B (private GHCR + per-fork imagePullSecret) replaces D4 — which restructures **W2** (registry choice), **W3** (pull auth), and **ONBOARD-INIT** (GHCR visibility flip becomes either a no-op or an imagePullSecret provisioning step depending on fallback). `ONBOARD` (cluster-side IAM) is unaffected — the credential boundary contains the blast radius. Discovering this after Wave B agents have shipped composite actions is the largest avoidable rework in this plan. Spend a day waiting for an answer; save a week of rework.
+> **Gate 0c — current resolution.** Proceeding with public GHCR on the `danielscholl-osdu` sandbox + reference fork. Rationale: observable practice across `github.com/Azure` (300+ public GHCR packages, including 1.55B-download Eraser, plus azd, kubelogin, c3, azure-workload-identity) confirms public GHCR is normalized for developer-tooling and CI-loop containers. Microsoft's MCR publishing policy (*"Do not post containers to GHCR/GitHub Packages/DockerHub directly"*, `aka.ms/mcr/onboarding`) applies to customer-shipped product containers; the SPI service containers built here are CI test artifacts consumed by the shared `spi-stack` AKS cluster, not customer-facing images. See §7.4 *"Future migration: MCR"* for the deferred revisit point. **Future state:** when these images leave the CI test loop (production consumption, upstream `Azure/osdu-spi-*` repos), evaluate MCR migration — the credential boundary (§5.5) keeps it a localized swap in W2 / ONBOARD-INIT-A / SETTINGS-APPLY's visibility helper. Cluster-side and deploy-path components are registry-agnostic.
 
 | # | Check | Why it gates | Blocks |
 |---|---|---|---|
-| **0c** | **(RUN FIRST)** Confirm Azure org policy permits public GHCR packages for the publishing org. For `danielscholl-osdu` sandbox: OK. For `Azure/osdu-spi`-derived production: get explicit sign-off. | If disallowed, design switches to §7.4 fallback A or B — this changes the shape of W2, W3, ONBOARD-INIT (NOT ONBOARD — the cluster-side IAM grants are agnostic to registry choice). | **W2 finalization** (registry choice), **W3 finalization** (pull-auth path), **ONBOARD-INIT finalization** (visibility step or pull-secret step), **Phase 4 PR back to upstream** (compliance sign-off required pre-merge) |
+| **0c** | ~~RUN FIRST~~ **Resolved — proceed with public GHCR on `danielscholl-osdu`** (sandbox + reference fork). MCR migration deferred until images leave the CI test loop or upstream review demands it; see §7.4 *"Future migration: MCR"*. If upstream `Azure/osdu-spi` review surfaces an MCR requirement later, §7.4 fallback A (ACR + AcrPull) or B (private GHCR + per-fork imagePullSecret) — or a direct MCR path — replaces D4 in W2 / ONBOARD-INIT-A / SETTINGS-APPLY only. `W3`/`W4`/`W5b`/`W8`/`ONBOARD` are registry-agnostic. | (No longer blocking sandbox work.) | Sandbox + Phase 5 rollout on danielscholl-osdu: **not blocked**. Upstream **Phase 4 PR back to `Azure/osdu-spi`**: still gated on Azure-org-side review confirming GHCR is acceptable for this class of container (or pivot to MCR), but that conversation no longer blocks agent firing on this fork. |
 | 0a | Confirm Helm chart materializes `Deployment/<name>` in `osdu` namespace for partition. Capture the exact `metadata.name` and container name. | If the chart names resources unpredictably, `kubectl set image deployment/partition` won't find anything (C5/D13). | **W3 merge** (action assumes specific naming) |
 | 0b | Confirm AKS auth mode (Entra-managed vs. local-accounts-disabled vs. WI SA). | Drives the RoleBinding form in §6.1 step 3. | **W3 merge** (action's RBAC binding form), **ONBOARD merge** (script's RBAC step) |
 | 0d | Confirm gateway URL stability — is the DNS owned and stable, or does it change on cluster re-provisioning? | A regenerable gateway URL means every fork's `GATEWAY_URL` var is a moving target. | **W4 merge** (integration-test consumes the URL) |
@@ -1304,7 +1324,7 @@ For variables the operator must set out of band, `settings-apply.yml` opens an i
 
 **Goal:** Land the validated design in the official engineering system in two sequenced PRs.
 
-**Why two PRs.** The cut runs along the credential boundary (§5.5, ADR-036). the Build PR ("Build to GHCR") is everything that runs under `GITHUB_TOKEN` and produces container images; nothing in it touches Azure or the cluster. the Deploy PR ("Deploy + Integration Test") adds the cluster-deploy path on top, including the trust-boundary `if:` clause and federated identity. A single combined PR would couple two concerns with very different review surfaces — one is "is the docker build right?", the other is "is the deploy attack surface right?" — and would force the Deploy PR's Phase 0 gates (0a/0b/0d/0e/0f) to delay everything in the Build PR, which only needs gate 0c.
+**Why two PRs.** The cut runs along the credential boundary (§5.5, ADR-036). the Build PR ("Build to GHCR") is everything that runs under `GITHUB_TOKEN` and produces container images; nothing in it touches Azure or the cluster. the Deploy PR ("Deploy + Integration Test") adds the cluster-deploy path on top, including the trust-boundary `if:` clause and federated identity. A single combined PR would couple two concerns with very different review surfaces — one is "is the docker build right?", the other is "is the deploy attack surface right?" — and would force the Deploy PR's Phase 0 gates (0a/0b/0d/0e/0f) to delay everything in the Build PR, which has no remaining Phase 0 blockers for sandbox work (Gate 0c resolved; see §9.1).
 
 A side benefit: once the Build PR merges, service forks pick up image-build capability via template-sync immediately. Phase 5 rollout can start there. Deploy/integration-test become required checks per-fork only after the Deploy PR also lands and `ONBOARD-INIT-B` runs.
 
@@ -1318,7 +1338,7 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 #### 9.5.A Phase 4a — Build PR
 
 **Effort:** S
-**Phase 0 gate that blocks:** 0c only (Azure org policy on public GHCR packages)
+**Phase 0 gate that blocks:** None for sandbox work (Gate 0c resolved per §9.1 — public GHCR proceeds). Upstream submission to `Azure/osdu-spi` may surface MCR per Microsoft's container policy; swap scope per §7.4 *"Migration-swap scope"* (localized for MCR/ACR; broader for private-GHCR fallback).
 
 **Scope — everything below this line ships in Build PR, nothing else:**
 
@@ -1360,7 +1380,7 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 
 3. **Pre-merge checks (Build PR):**
    - Sandbox proof points referenced: 10+ build-green runs on partition (build pipeline only; deploy not required green for this PR)
-   - Compliance sign-off for GHCR public visibility captured (Phase 0 gate 0c)
+   - Upstream-publishing posture confirmed: GHCR-as-design-default acknowledged in PR description with reference to Azure-org precedent (§7.4); if Azure-org review requests MCR or private-GHCR fallback, swap path documented (§7.4 *"Migration-swap scope"*)
    - Existing service forks notified that template-sync will bring `docker-build` to them; they will start producing images but no cluster effect (no deploy job yet)
 
 4. **Merge sequence (Build PR):**
@@ -1479,7 +1499,7 @@ Both flows converge on the same steady state: every fork has the up-to-date rule
 | Phase 1 — Sandbox setup | **XS** | One verify step left |
 | Phase 2 — Workflow implementation | **L** | 13 work items; mostly XS/S/M individually, parallelizable per [`cicd-implementation-plan.md`](./cicd-implementation-plan.md) |
 | Phase 3 — Onboarding split: cluster-side `spi onboard` (M, cross-repo) + fork-side `init.yml` extension (S, this repo) | **M+S** | Two halves along the credential boundary — see §9.4 |
-| Phase 4a — Build PR (Build to GHCR) | **S** | Coordination + diff + ADR renumbering; gated by Phase 0 0c only |
+| Phase 4a — Build PR (Build to GHCR) | **S** | Coordination + diff + ADR renumbering; no Phase 0 blockers for sandbox work (Gate 0c resolved); upstream review may surface MCR per §7.4 *"Migration-swap scope"* |
 | Phase 4b — Deploy PR (Deploy + Integration Test) | **S** | Coordination + diff; gated by Phase 0 0a/0b/0d/0e/0f + step 4a |
 | Phase 5 — Per-service rollout | **M** | Each service is S; 7 services, parallelizable across operators |
 
@@ -1504,7 +1524,7 @@ T-shirt sizes describe **effort scale**, not wall-clock time. Real elapsed time 
 | R11 | Acceptance test credentials leak via Key Vault misconfig | L | H | KV RBAC scoped per service identity to read-only on specific secret prefixes; PR template warns against committing KV secret values |
 | R12 | Maven profile name varies across services (`-P partition-azure` vs `-P entitlements-azure`) | H | L | `MAVEN_PROFILE` per-service repo variable; java-build action accepts it as input |
 | **R13** | **`pull_request_target` deploy path executes attacker-controlled PR code with cluster credentials** | **L (today) / M (post-rollout)** | **VH** | **C8/D14 — gating clause in §5.5 excludes `pull_request_target` and `dependabot[bot]` from new jobs entirely; trust-boundary table is authoritative** |
-| **R14** | **Azure org policy forbids public GHCR packages, killing D4 strategy** | **M** | **H** | **Phase 0 gate 0c surfaces this before any workflow YAML is written; §7.4 fallbacks A (ACR + AcrPull) and B (private GHCR + image-pull-secret) documented** |
+| **R14** | **Upstream `Azure/osdu-spi-*` publishing review demands MCR (or rejects public GHCR), forcing registry swap on the Build PR** | **L (sandbox-phase) / M (upstream-phase)** | **M** | **Sandbox + danielscholl-osdu proceed on public GHCR — observable precedent across `github.com/Azure` (Eraser 1.55B downloads, azd, kubelogin, c3) confirms the pattern is normalized for CI/tooling containers. Upstream review may surface MCR per Microsoft's published policy (§7.4 *"Future migration: MCR"*); credential boundary keeps the swap localized to W2 / ONBOARD-INIT-A / SETTINGS-APPLY's visibility helper. `W3`/`W4`/`W5b`/`W8`/`ONBOARD` are registry-agnostic, so a future MCR migration replaces push + visibility logic only, not the deploy or trust-boundary architecture.** |
 | **R15** | **Broken deploy from service A leaves the cluster in a state that fails service B's tests for reasons unrelated to B's PR** | **H** | **M** | **Cross-service health probe in integration-test (§5.3, §8.9); `test_result: advisory` distinguishes contamination from genuine failure; v2 may add last-known-good rollback** |
 | **R16** | **Helm chart names cluster resources unpredictably; `kubectl set image deployment/partition` finds no such resource** | **M** | **VH** | **D13 — `K8S_DEPLOYMENT_NAME`/`K8S_CONTAINER_NAME` as per-service variables captured during onboarding; Phase 0 gate 0a verifies before workflow code is written** |
 | **R17** | **Phase 0 manual proof never exercises the federated identity / OIDC path; surprises only land in Phase 2** | **H (without mitigation)** | **M** | **Phase 0 step 4a — minimal `workflow_dispatch` workflow validates `azure/login@v2` for every subject before W3 begins** |
@@ -1534,7 +1554,7 @@ Questions that have been resolved by this design pass are listed with their reso
 | Q8 | Are integration tests fast enough to run on every PR (<10min)? | Measured in Phase 0 step 7 (partition); each service measures during Phase 5 onboarding | Step 7 |
 | Q8-contingency | **If runtime exceeds budget**, the documented fallback (do not redesign the pipeline; pick one): (**a**) per-PR runs a tagged smoke subset via Maven `-Dgroups=...` (or surefire `<includes>`), full suite runs on merge-to-main as a separate non-blocking workflow; (**b**) per-PR deploy + sample probe (a handful of API calls against gateway), full suite runs nightly on a scheduled workflow. Decision is per-service — partition may afford (a), a slower service may need (b). | Operator at Phase 5 onboarding time | Captured in `cicd-poc-notes.md` per service |
 | **Q9 (new)** | What AKS auth mode is the spi-stack cluster using (Entra-managed, local-accounts-disabled, Workload Identity SA passthrough)? Determines K8s RoleBinding syntax. | User / inspect cluster | Step 0b |
-| **Q10 (new)** | Does the Azure org policy permit public GHCR packages for production publishing? (Sandbox org is fine.) | User / Azure security contact | Step 0c, blocks Phase 4 |
+| ~~**Q10 (new)**~~ Resolved | ~~Does the Azure org policy permit public GHCR packages for production publishing?~~ Sandbox + `danielscholl-osdu` proceed on public GHCR per observable `github.com/Azure` precedent. Upstream `Azure/osdu-spi-*` may pivot to MCR at Phase 4 review — swap scope per §7.4 *"Migration-swap scope"*. | n/a (resolved in design v2) | — |
 | **Q11 (new)** | Is the gateway URL stable across cluster re-provisioning, or DNS-regenerated? | User | Step 0d |
 | **Q12 (new)** | Per-service test data isolation — does partition's acceptance-test create uniquely-prefixed data and clean up? | Audit existing partition tests | Step 0e |
 | **Q13 (new)** | Per-service acceptance-test dependency graph — which services' tests call which other services' APIs? | Audit each acceptance-test pom + source | Phase 5 onboarding |
@@ -1945,7 +1965,7 @@ Pre-Phase 0 (gates from §9.1 step 0):
 - [ ] Confirm Flux is suspended (`flux get all -n flux-system` — every Kustomization shows `Suspended: True`)
 - [ ] **Gate 0a:** Confirm `osdu` namespace has a `Deployment` per service; capture exact `metadata.name` and container name for partition
 - [ ] **Gate 0b:** Identify AKS auth mode (Entra-managed vs. local-accounts-disabled vs. Workload Identity SA)
-- [ ] **Gate 0c:** Confirm public GHCR packages are allowed under the publishing org's policy (sandbox OK; production needs explicit sign-off pre-Phase-4)
+- [x] **Gate 0c:** ~~Confirm public GHCR packages are allowed~~ **Resolved** — proceed on public GHCR for sandbox + danielscholl-osdu phase per §7.4; upstream `Azure/osdu-spi` Phase 4 review may pivot to MCR (migration-swap scope documented in §7.4)
 - [ ] **Gate 0d:** Confirm gateway URL stability (stable DNS or regenerated per cluster?)
 - [ ] **Gate 0e:** Capture partition acceptance-test data isolation strategy (unique prefixes? cleanup?)
 - [ ] **Gate 0f:** Verify operator has the RBAC required by the onboarding script (§6.1 preconditions)
@@ -1968,7 +1988,7 @@ Pre-Phase 4:
 - [ ] Cluster-side onboarding (`spi onboard`, §9.4.A) tested re-running on partition (idempotent)
 - [ ] Fork-side onboarding (extended `init.yml`, §9.4.B) tested by re-dispatching on partition after `spi onboard` runs — GHCR public, retention set, ruleset updated, per-service vars present
 - [ ] ADR numbers re-checked vs. upstream `Azure/osdu-spi`
-- [ ] GHCR-public compliance sign-off obtained (Gate 0c)
+- [ ] Upstream review posture confirmed: Build PR description cites Azure-org public-GHCR precedent (§7.4); if Azure-org review pivots to MCR or private-GHCR fallback, the migration-swap path is documented and ready to execute (§7.4 *"Migration-swap scope"*)
 
 ### Appendix D — Glossary
 

@@ -65,7 +65,7 @@ Three slots span the cut and are split into A/B sub-issues, each shipping in its
 
 The lanes are **firing-order priorities**, not hard sequence locks. Agents can be fired on deploy-lane sub-issues in parallel with build-lane ones — the constraint is which upstream PR collects which sandbox PRs once they're green.
 
-- **Build lane fires first** because the Build PR is the priority upstream artifact and its only Phase 0 dependency is gate 0c (an email).
+- **Build lane fires first** because the Build PR is the priority upstream artifact. Gate 0c (GHCR policy) is **resolved for the sandbox + `danielscholl-osdu` phase** — public GHCR proceeds per design §7.4. A future upstream pivot to MCR or ACR-with-AcrPull stays localized to `W2` / `ONBOARD-INIT-A` / `SETTINGS-APPLY`'s visibility helper; the private-GHCR + per-fork imagePullSecret fallback is broader-touch (also needs cluster Secrets + chart `imagePullSecrets:` + an ONBOARD step) — see design §7.4 *"Migration-swap scope"*.
 - **Deploy lane fires as drafts in parallel** because most acceptance criteria explicitly say *"scaffolding with documented assumptions is fine"* — gate findings revise drafts in-PR rather than restarting agents.
 - **`W5b` waits for the deploy-lane composite actions** (`W3`, `W4`) plus `W13`. Drafting `W5b` earlier references non-existent paths and burns agent context.
 
@@ -114,8 +114,7 @@ graph TD
         W10["W10<br/>rulesets<br/>(two-pass JSON edit)"]
     end
 
-    subgraph Phase0["Phase 0 — human-driven, parallel with everything"]
-        G0c["Gate 0c<br/>GHCR org policy"]:::human
+    subgraph Phase0["Phase 0 — human-driven, parallel with everything (Gate 0c resolved)"]
         Gates["Gates 0a/0b/0d/0e/0f<br/>cluster"]:::human
         OIDC["Step 4a<br/>OIDC validation"]:::human
         MANUAL["Steps 1-7<br/>manual deploy + tests"]:::human
@@ -131,8 +130,6 @@ graph TD
     W13 --> W5B
     W3 --> W14
 
-    G0c -. informs .-> W2
-    G0c -. informs .-> ONBOARD_INIT_A
     Gates -. informs .-> W3
     Gates -. informs .-> ONBOARD
     OIDC -. informs .-> W5B
@@ -140,14 +137,14 @@ graph TD
 
 ## Wave strategy
 
-The wave order is **build-lane first** because the Build PR is the priority upstream artifact and only depends on Phase 0 gate 0c (an email). Deploy-lane agents fire in parallel as drafts; reviewer attention prioritizes the build lane until the Build PR merges. Each wave is fully parallel internally.
+The wave order is **build-lane first** because the Build PR is the priority upstream artifact. Gate 0c is **resolved for the sandbox + danielscholl-osdu phase** (public GHCR proceeds per design §7.4). Deploy-lane agents fire in parallel as drafts; reviewer attention prioritizes the build lane until the Build PR merges. Each wave is fully parallel internally.
 
 ### Build lane (feeds Build PR)
 
 | Wave | Slots | Why this order |
 |------|-------|----------------|
 | **1 — ground the design** | `ADR-033`, `ADR-035`, `POC`, `SPECS-A` | Docs-only; reviewers reading these understand the build-PR decisions before judging the code |
-| **2 — composite actions + plumbing** | `W1`, `W2`, `W7`, `W11` | The build-path code. `W2` is gated by Gate 0c (run-first email) — scaffold with documented assumptions if needed |
+| **2 — composite actions + plumbing** | `W1`, `W2`, `W7`, `W11` | The build-path code. `W2` proceeds on public GHCR for the sandbox phase (§7.4); future MCR migration would touch this action only, not its callers |
 | **3 — onboarding + settings reconciliation** | `ONBOARD-INIT-A`, `SETTINGS-APPLY` | `ONBOARD-INIT-A` is the **fresh-fork** path (consumed by `init.yml` on template create): GHCR visibility + `SERVICE_NAME`/`MAVEN_PROFILE` vars. `SETTINGS-APPLY` is the **existing-fork** path: idempotent `setup-rulesets.sh` + `settings-apply.yml` workflow that reconciles rulesets, GHCR visibility, and surfaces missing per-service variables via an issue. Existing service forks need `SETTINGS-APPLY` because `init.yml` deletes its own helpers and can't be re-dispatched. Retention is **W11's job alone**, not ONBOARD-INIT-A's |
 | **4 — wire it together** | `W5a`, `W10` (first pass) | `W5a` blocked by `W1` + `W2`. `W10`'s first pass adds the `docker-build` required check; second pass lands with deploy-lane wave 4 |
 
@@ -914,7 +911,8 @@ Author `doc/src/adr/033-ghcr-as-service-image-registry.md`. Content per Appendix
 **Acceptance criteria:**
 - [ ] Standard ADR structure (Context, Decision, Consequences, optional Alternatives Considered — terse, bullet form)
 - [ ] **No `Status:` field, no dates, no retrospective content** (ADRs are mutable Design Records; see `doc/src/adr/learnings.md`)
-- [ ] Calls out the compliance question explicitly (public packages allowed under publishing-org policy — Phase 0 gate 0c)
+- [ ] **Calls out the publishing-org-policy context.** Observable precedent across `github.com/Azure` (300+ public GHCR container packages — Eraser at 1.55B downloads, azd, kubelogin, c3, azure-workload-identity) normalizes the pattern for CI/tooling containers. Microsoft's MCR publishing policy (`aka.ms/mcr/onboarding`) applies to customer-shipped product containers; SPI service images are CI test artifacts consumed by the shared `spi-stack` AKS cluster, so the GHCR pattern fits the policy's observed scope
+- [ ] **Notes future MCR migration as deferred** with explicit scope (design §7.4 *"Future migration: MCR"* + *"Migration-swap scope"*): MCR and ACR-with-existing-AcrPull (Option A) are **localized swaps** touching only `W2` / `ONBOARD-INIT-A` / `SETTINGS-APPLY`'s visibility helper; the private-GHCR + per-fork imagePullSecret fallback (Option B) is **broader-touch** — additionally requires `regcred` Secrets in `osdu` namespace, chart-level `imagePullSecrets:` wiring, and a Secret-provisioning step in `ONBOARD`
 - [ ] Renumber if needed
 
 **Reference:** Design doc Appendix B + §7.4.
