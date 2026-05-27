@@ -425,16 +425,19 @@ When release-please merges a release PR and creates a tag (e.g. `v1.2.3`), the e
 **Task:**
 Update `.github/template-workflows/release.yml` to add an image-retag job that takes the existing `:sha-<short-sha>` image and tags it as `:<version>`. Use `docker buildx imagetools create` (or `crane`) so the manifest is re-tagged without rebuilding.
 
-**Trigger model.** Use the release-please **same-workflow-run** path: release.yml already runs on `push: branches: [main]` and invokes `googleapis/release-please-action`. When that action emits `release_created: true` and `tag_name`, run the retag job conditionally in the same workflow run — `if: ${{ needs.release-please.outputs.release_created == 'true' }}`. Do **not** add a separate `push: tags:` trigger; release-please's commit author already created the tag, and an additional tag-push trigger would race the retag against itself for the same release commit.
+**Trigger model.** Use the release-please **same-workflow-run** path: release.yml already runs on `push: branches: [main]` and invokes `googleapis/release-please-action`. The retag job runs conditionally in the same workflow run gated on the release-please outputs. Do **not** add a separate `push: tags:` trigger; release-please's commit author already created the tag, and an additional tag-push trigger would race the retag against itself for the same release commit.
+
+**Critical: extend release-please job outputs.** The existing `release-please` job in `release.yml` (currently at line 41) only exposes `release_created`. The retag job needs the tag/version too. **Add `tag_name` (and optionally `version`) to the job's `outputs:` block** so the retag job can consume `${{ needs.release-please.outputs.tag_name }}`. Both values come from the `googleapis/release-please-action` step's outputs.
 
 **Files:**
 - `.github/template-workflows/release.yml`
 
 **Acceptance criteria:**
+- [ ] **Release-please job outputs extended:** the existing `release-please` job's `outputs:` block adds `tag_name: ${{ steps.release.outputs.tag_name }}` (and `version: ${{ steps.release.outputs.version }}` if a `v`-prefix-stripped form is needed downstream). Without this, the retag job has nothing to consume — the current workflow only exposes `release_created`
 - [ ] **Permissions on the retag job:** `permissions: packages: write, contents: read` (write to GHCR; existing release-please job's permissions are unchanged)
 - [ ] **GHCR login step** before the imagetools call: `docker login ghcr.io -u ${{ github.actor }} --password-stdin` (or equivalent via `docker/login-action@<sha>` pinned per repo convention) — the default workflow has no GHCR auth without it
-- [ ] **Trigger model:** retag job runs in the same workflow run as release-please, gated on `release_created == 'true'`, consumes `${{ needs.release-please.outputs.tag_name }}`. Use `needs:` to wait on the release-please job
-- [ ] On release-please's release-created event, the existing GHCR image at `:sha-<short-sha>` is re-tagged with the version (e.g. `:1.2.3` — strip the leading `v` only if release-please outputs it that way; check `tag_name` format first)
+- [ ] **Trigger model:** retag job runs in the same workflow run as release-please, gated on `if: ${{ needs.release-please.outputs.release_created == 'true' }}`, consumes `${{ needs.release-please.outputs.tag_name }}`. Use `needs: [check-initialization, release-please]` to wait on the release-please job (matches the existing `build` job pattern)
+- [ ] On release-please's release-created event, the existing GHCR image at `:sha-<short-sha>` is re-tagged with the version (e.g. `:1.2.3` — strip the leading `v` only if `tag_name` outputs it that way; inspect `release-please-action` docs / outputs for whether `version` or `tag_name` is the v-stripped form)
 - [ ] No re-deploy or re-test triggered by tag
 - [ ] If the source SHA tag doesn't exist on GHCR (e.g., merge-to-main build was skipped or failed), the job fails with a clear message: *"release tag created without a build behind it — investigate why the merge-to-main run didn't produce `:sha-<short-sha>` before re-running this workflow"*
 - [ ] **Action pinning:** all third-party actions (release-please-action, docker/login-action, etc.) pinned to full SHA with version comment matching repo convention
@@ -499,9 +502,13 @@ If any of these change (here or in `W5a`/`W5b`), all three must update in lockst
 **Files:**
 - `.github/rulesets/default-branch.json`
 
+**Sequencing — draft-ready, merge-blocked.** This issue can be drafted and PR-reviewed in parallel with `W5a`/`W5b`, but **must not merge in either pass before the matching `validate.yml` jobs exist on the fork**. If `default-branch.json` adds `🐳 Docker Build` as a required check before `W5a`'s docker-build job lands and runs, every PR on partition is blocked on a check that never reports. Reviewers: hold this PR's merge until:
+- **Pass 1 merge** waits on `W5a` (#22) merged AND first green docker-build run on partition observed
+- **Pass 2 merge** waits on `W5b` (#6) merged AND first green deploy+integration-test run on partition observed
+
 **Acceptance criteria:**
-- [ ] **Pass 1:** `🐳 Docker Build` present in `default-branch.json` required checks; exact string match with `W5a`'s docker-build job `name:`
-- [ ] **Pass 2:** `🚀 Deploy to spi-stack` + `🧪 Integration Tests` present in `default-branch.json` required checks; exact string match with `W5b`'s deploy + integration-test job `name:` fields
+- [ ] **Pass 1:** `🐳 Docker Build` present in `default-branch.json` required checks; exact string match with `W5a`'s docker-build job `name:`. **Hold merge until W5a is green on partition** (per Sequencing above)
+- [ ] **Pass 2:** `🚀 Deploy to spi-stack` + `🧪 Integration Tests` present in `default-branch.json` required checks; exact string match with `W5b`'s deploy + integration-test job `name:` fields. **Hold merge until W5b is green on partition**
 - [ ] No edits to `integration-branch.json` (cascade flow allows direct pushes; new checks don't apply)
 - [ ] After this PR merges and `SETTINGS-APPLY`'s `settings-apply.yml` runs on each fork (or `init.yml` runs on a fresh fork), `gh api /repos/{owner}/{repo}/rulesets/{id}` shows the new check context(s) in `parameters.required_status_checks`
 - [ ] PRs that fail the new check(s) cannot merge to `main` (verifiable end-to-end once W5a/W5b lands and partition runs CI)
@@ -632,52 +639,79 @@ Implement `spi onboard --service <name> --repo <org/repo> --aks-cluster <cluster
 **Slot:** `SETTINGS-APPLY` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
 
 **Context:**
-`init.yml` runs **once** on a fresh fork and `deploy-fork-resources.sh` deletes the init helpers (`init.yml`, `init-complete.yml`, `.github/local-actions/`) after merge. Existing service forks (entitlements, legal, schema, storage, search, indexer, file) therefore have **no path** to re-run `ONBOARD-INIT-A` or `ONBOARD-INIT-B` — those are fresh-fork-only. `sync.yml` brings new files into forks via PR but does not call any GitHub Settings/Rulesets API, so ruleset updates also never reach existing forks. Additionally, the existing `setup-rulesets.sh` is **POST-only**: it creates rulesets the first time but errors (HTTP 422) if a ruleset with the same name already exists, blocking idempotent updates.
+`init.yml` runs **once** on a fresh fork and `deploy-fork-resources.sh` deletes the init helpers (`init.yml`, `init-complete.yml`, `.github/local-actions/`) after merge — the entire `.github/local-actions/` path is in `sync-config.json`'s `cleanup_rules.directories`. Existing service forks (entitlements, legal, schema, storage, search, indexer, file) therefore have **no path** to re-run `ONBOARD-INIT-A` or `ONBOARD-INIT-B` — those are fresh-fork-only. `sync.yml` brings new files into forks via PR but only for paths explicitly declared in `sync-config.json` — and that file currently does NOT list `.github/rulesets/**`, `.github/template-workflows/settings-apply.yml`, or any settings-apply helpers, so without an explicit config change nothing in this slot actually reaches existing forks. Additionally, the existing `setup-rulesets.sh` is **POST-only**: it creates rulesets the first time but errors (HTTP 422) if a ruleset with the same name already exists, blocking idempotent updates.
 
-This slot closes both gaps. It is the existing-fork side of the propagation story (the fresh-fork side stays with `ONBOARD-INIT-A`/`ONBOARD-INIT-B`).
+This slot closes all gaps: makes the rulesets helper idempotent, **relocates it from the init-only `.github/local-actions/` path to the durable `.github/scripts/settings-apply/` path** (so it's not subject to init-time cleanup), adds the reconciliation workflow, and explicitly extends `sync-config.json` so all the new artifacts actually propagate to forks.
 
 **Task:**
-Three coordinated changes:
+Five coordinated changes:
 
-1. **Make `setup-rulesets.sh` idempotent.** Probe for an existing ruleset by name via `GET /repos/{owner}/{repo}/rulesets`; if present, `PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}` to replace; if absent, keep today's `POST` create path. Add a `--dry-run` mode that prints the planned changes without applying.
+1. **Make `setup-rulesets.sh` idempotent + relocate to durable path.**
+   - Move `.github/local-actions/init-helpers/setup-rulesets.sh` → `.github/scripts/settings-apply/setup-rulesets.sh`.
+   - Update the script logic: probe for an existing ruleset by name via `GET /repos/{owner}/{repo}/rulesets`; if present, `PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}` to replace; if absent, keep today's `POST` create path. Add a `--dry-run` mode that prints the planned changes without applying.
+   - Update `.github/workflows/init-complete.yml`'s `Setup Repository Rulesets` step (around lines 342-348) to call the script from its new location. The temp-location preservation pattern (lines 290-302) becomes unnecessary for this script — it's now durable in `.github/scripts/settings-apply/`, which is not in `cleanup_rules`.
 
-2. **Stop deleting `setup-rulesets.sh` post-init.** Edit `.github/local-actions/init-helpers/deploy-fork-resources.sh` so the rulesets helper persists in the fork (alongside `.github/rulesets/*.json`). All other init-only helpers continue to be deleted as today — only the rulesets helper is durable.
+2. **Add new helper scripts at the durable path.**
+   - `.github/scripts/settings-apply/check-required-variables.sh` — verifies each required per-service variable; opens or updates a `human-required` issue listing what's missing; closes it when all required vars are present.
+   - `.github/scripts/settings-apply/reconcile-ghcr-visibility.sh` — same flip logic that `W2` uses post-push (org/user endpoint discrimination per §7.4); extract to shared helper consumed by both `W2`'s composite action and this workflow.
 
-3. **Add `.github/template-workflows/settings-apply.yml`.** A new workflow installed on every fork via template-sync that reconciles repo configuration:
-   - Triggers: `workflow_dispatch`, `schedule` (weekly, e.g. Mondays 06:00 UTC), `push` to `main` with `paths: ['.github/rulesets/**']`
-   - Calls the now-idempotent `setup-rulesets.sh` to reconcile `default-branch.json` + `integration-branch.json`
-   - Calls a new `check-required-variables.sh` helper that verifies each variable listed in a per-service manifest (`SERVICE_NAME`, `MAVEN_PROFILE` for PR #1's set; `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`, `AZURE_CLIENT_ID` added by PR #2) is present; if absent, opens (or updates) an open issue labelled `human-required` listing exactly what's missing
-   - Calls a new `reconcile-ghcr-visibility.sh` helper that, when the package exists, ensures public visibility (mirrors W2's flip; same org-vs-user endpoint discrimination from §7.4)
+3. **Add `.github/template-workflows/settings-apply.yml`.** Reconciliation workflow installed on every fork via template-sync:
+   - Triggers: `workflow_dispatch`, `schedule` (weekly, e.g. Mondays 06:00 UTC), `push` to `main` with **`paths: ['.github/rulesets/**', '.github/scripts/settings-apply/**']`** — exactly the paths that, when updated upstream, should re-trigger reconciliation
+   - Calls the now-idempotent `setup-rulesets.sh` (from `.github/scripts/settings-apply/`) to reconcile `default-branch.json` + `integration-branch.json`
+   - Calls `check-required-variables.sh` against a per-service manifest (see required-variable manifest below)
+   - Calls `reconcile-ghcr-visibility.sh` to ensure public visibility when the GHCR package exists
    - Step summary captures: rulesets reconciled (created/updated/no-op), variables missing (none/list), GHCR visibility state
 
-This workflow runs on existing service forks the next time `sync.yml` brings the updated `.github/rulesets/*.json` (or the workflow itself) and the operator merges the sync PR. For fresh forks, `ONBOARD-INIT-A`/`ONBOARD-INIT-B` still does the first-time setup via `init.yml` inputs; `settings-apply.yml` takes over for ongoing reconciliation.
+4. **Modify `.github/sync-config.json`** so all the new artifacts actually propagate from template to forks. This is the change without which the entire slot is a no-op on existing forks. Add three entries:
+   - `sync_rules.directories[]` — new entry `{"path": ".github/rulesets", "sync_all": true, "description": "Branch-protection rulesets reconciled by settings-apply.yml"}`
+   - `sync_rules.directories[]` — new entry `{"path": ".github/scripts/settings-apply", "sync_all": true, "description": "Durable settings reconciliation helpers (called by settings-apply.yml)"}`
+   - `sync_rules.workflows.template_workflows[]` — new entry `{"path": ".github/template-workflows/settings-apply.yml", "description": "Per-fork settings reconciliation (idempotent ruleset PUT + variable presence + GHCR visibility)"}`
+   - **Do NOT add these paths to `cleanup_rules`** — they must remain in forks indefinitely.
+
+5. **Required-variable manifest** consumed by `check-required-variables.sh`. The manifest lives inside the helper (a small bash array or a JSON file alongside) so future variable additions are one source-of-truth edits. The PR #1 set, the PR #2 set, and the cluster-handoff set are all required for a fully-operational fork:
+
+   | Variable | Owner | When required |
+   |---|---|---|
+   | `SERVICE_NAME` | Operator (set by `ONBOARD-INIT-A` on fresh forks; manual on existing) | Always |
+   | `MAVEN_PROFILE` | Operator | Always (drives `W1` / `W5a` build path) |
+   | `ACCEPTANCE_TEST_DIR` | Operator | After PR #2 lands |
+   | `ACCEPTANCE_TEST_SECRET_MAP` | Operator | After PR #2 lands |
+   | `ACCEPTANCE_TEST_DEPENDENCIES` | Operator | After PR #2 lands |
+   | `K8S_DEPLOYMENT_NAME` | `spi onboard` (writes via `gh variable set`) | After PR #2 lands; consumed by `W5b`'s deploy job |
+   | `K8S_CONTAINER_NAME` | `spi onboard` | After PR #2 lands; consumed by `W5b`'s deploy job + W14 restore |
+   | `AZURE_CLIENT_ID` (secret) | `spi onboard` | After PR #2 lands; checked-present, never logged |
 
 **Files:**
-- `.github/local-actions/init-helpers/setup-rulesets.sh` (modify — idempotent GET-then-PUT/POST + `--dry-run`)
-- `.github/local-actions/init-helpers/deploy-fork-resources.sh` (modify — preserve `setup-rulesets.sh` post-init)
-- `.github/local-actions/init-helpers/check-required-variables.sh` (new)
-- `.github/local-actions/init-helpers/reconcile-ghcr-visibility.sh` (new — same flip logic as W2 and ONBOARD-INIT-A; extract to shared helper)
+- `.github/local-actions/init-helpers/setup-rulesets.sh` — **delete** (moved to new location)
+- `.github/scripts/settings-apply/setup-rulesets.sh` (new — relocated + idempotent + `--dry-run`)
+- `.github/scripts/settings-apply/check-required-variables.sh` (new)
+- `.github/scripts/settings-apply/reconcile-ghcr-visibility.sh` (new — shared helper consumed by `W2` and this workflow)
+- `.github/workflows/init-complete.yml` (modify — call `setup-rulesets.sh` from new location; remove its entry from the temp-location preservation block since it's now durable)
 - `.github/template-workflows/settings-apply.yml` (new)
+- `.github/sync-config.json` (modify — add the three sync entries described above)
 
 **Acceptance criteria:**
-- [ ] `setup-rulesets.sh` is idempotent: on a fork where `Default Branch Protection` already exists, re-running the script with an updated `default-branch.json` results in PUT to the existing ruleset id and a no-op summary line; on a fork without rulesets, behaviour is unchanged from today (POST creates). Same for `Integration Branch Protection`
-- [ ] `setup-rulesets.sh --dry-run` prints the planned actions per ruleset (`create`, `update`, `no-change`) without calling the API
-- [ ] `deploy-fork-resources.sh` no longer deletes `setup-rulesets.sh` or the `.github/rulesets/` directory; all other current deletions preserved. Add a comment explaining why this script is durable
-- [ ] `settings-apply.yml`'s `paths:` filter includes `.github/rulesets/**` and `.github/local-actions/init-helpers/setup-rulesets.sh` so the workflow re-runs after either is updated via template-sync PR
-- [ ] `settings-apply.yml` requires `permissions: contents: read, issues: write, administration: write` (rulesets API needs admin); documents that the workflow must run as a GitHub App token (the default `GITHUB_TOKEN` lacks ruleset write)
-- [ ] `check-required-variables.sh` opens at most one `human-required: settings-apply` issue per fork (idempotent: updates the existing open issue's body rather than spawning duplicates)
-- [ ] `reconcile-ghcr-visibility.sh` uses org vs user endpoint discrimination per §7.4; skips silently if the package doesn't exist (first `docker-build` will create it; settings-apply on schedule reconciles after)
+- [ ] `setup-rulesets.sh` is idempotent: on a fork where `Default Branch Protection` already exists, re-running the script with an updated `default-branch.json` results in PUT to the existing ruleset id; on a fork without rulesets, behaviour is unchanged from today (POST creates). Same for `Integration Branch Protection`. Action plan per ruleset (create / update / no-change) logged to step summary
+- [ ] `setup-rulesets.sh --dry-run` prints the planned actions per ruleset without calling the mutating API
+- [ ] `setup-rulesets.sh` is at `.github/scripts/settings-apply/setup-rulesets.sh`. The old `.github/local-actions/init-helpers/setup-rulesets.sh` is deleted. `init-complete.yml`'s `Setup Repository Rulesets` step is updated to call the new path; the script no longer appears in the temp-location preservation block at lines 290-302
+- [ ] **`settings-apply.yml`'s `paths:` filter** matches the relocated layout exactly: `['.github/rulesets/**', '.github/scripts/settings-apply/**']` — covers both ruleset JSON changes and helper-script changes
+- [ ] `settings-apply.yml` requires `permissions: contents: read, issues: write, administration: write` (rulesets API needs admin; opening/updating issues needs `issues: write`). Workflow documents that it must run as a GitHub App token (the default `GITHUB_TOKEN` lacks ruleset write)
+- [ ] **`check-required-variables.sh` manifest**: must verify presence of all 8 variables/secrets listed in the manifest table above (`SERVICE_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`, `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`, `AZURE_CLIENT_ID`). For each missing item, list it explicitly in the issue body with the documented owner (operator vs `spi onboard`) so the operator knows which path to follow. **`AZURE_CLIENT_ID` is checked-present-only — never log its value**
+- [ ] **`check-required-variables.sh` issue lifecycle**: opens at most one `human-required` issue per fork (idempotent — updates the existing open issue's body rather than spawning duplicates; searches by title prefix `settings-apply: required variables missing`). When all required variables are present on a subsequent run, the helper **closes the open issue** with a comment listing what's now satisfied. The `human-required` label already exists in `.github/labels.json` and is synced to forks via the existing label-management flow — but the helper's first action should `gh label list --search human-required` and create the label if absent (defensive guard for forks that pre-date the label)
+- [ ] `reconcile-ghcr-visibility.sh` uses org vs user endpoint discrimination per §7.4; skips silently if the package doesn't exist (first `docker-build` will create it; settings-apply on schedule reconciles after). When package exists and is already public, log "already public, no change"; soft-fails on PATCH 4xx (warn, do not fail the workflow)
+- [ ] **`.github/sync-config.json` is modified** with exactly the three entries described in Task step 4 (two `directories[]` rows + one `template_workflows[]` row). Verify post-merge that a sync run on partition picks up the new rulesets JSON + helper scripts + workflow
 - [ ] Step summary on every run lists what was reconciled, what changed, and what's still missing — so an operator scrolling through a weekly run can confirm health at a glance
 - [ ] No secret values logged at any step
+- [ ] Third-party actions pinned to full SHA with version comment (match existing workflow pinning convention)
 
-**Reference:** Existing `setup-rulesets.sh`, `deploy-fork-resources.sh`, `init-complete.yml`. Design doc §7.3 + §7.4 + §9.4. Template-sync mechanism: ADR-012.
+**Reference:** Existing `setup-rulesets.sh`, `init-complete.yml` lines 290-348, `sync-config.json` (sync_rules + cleanup_rules), `.github/labels.json` (already has `human-required`). Design doc §7.3 + §7.4 + §9.4. Template-sync mechanism: ADR-012.
 
 **Out of scope:**
 - Cross-fork orchestration (each fork reconciles itself via its own `settings-apply.yml`)
 - Auto-setting required variable *values* (the workflow surfaces what's missing; operators populate values)
-- Modifying `sync.yml` (template-sync's role is unchanged — it brings files; `settings-apply.yml` applies them)
+- Modifying `sync.yml` itself (template-sync's role is unchanged — it brings files declared in `sync-config.json`; this slot adds the declarations and `settings-apply.yml` applies the file contents)
+- Adding `.github/scripts/settings-apply/` to `cleanup_rules` — these paths must remain in forks indefinitely
 - Cluster-side IAM (`ONBOARD` in `osdu-spi-stack`)
-
 ---
 
 ### ONBOARD-INIT-A: Extend init.yml for build-side fresh-fork onboarding (GHCR visibility + per-service vars)

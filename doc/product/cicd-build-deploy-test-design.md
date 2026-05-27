@@ -1320,8 +1320,9 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 | Composite actions | `java-build` (`maven_profile` input added — W1), new `docker-build` action (W2) |
 | Workflow wiring | `validate.yml` gains the `docker-build` job only — no `if:` trust-boundary gating (build is safe on PRs); no deploy/integration-test jobs yet (W5a) |
 | Other workflows | `release.yml` adds the `:<version>` re-tag step (W7); new `ghcr-retention.yml` scheduled workflow (W11) |
-| Onboarding (fork-side) | `init.yml` / init-helpers gain GHCR visibility flip + retention + `SERVICE_NAME`/`MAVEN_PROFILE` per-service variable bootstrap + the docker-build check added to the required-checks ruleset (ONBOARD-INIT-A) |
-| Rulesets | `default-branch.json` adds `docker-build` to required checks (W10 first pass) |
+| Onboarding (fresh forks, fork-side) | `init.yml` / init-helpers gain GHCR visibility flip + `SERVICE_NAME`/`MAVEN_PROFILE` per-service variable bootstrap (ONBOARD-INIT-A). **No retention** (that's W11) and **no separate ruleset extension helper** (existing `setup-rulesets.sh` call from `init-complete.yml` already POSTs the up-to-date `default-branch.json` from W10) |
+| Settings reconciliation (existing forks) | Relocate `setup-rulesets.sh` to durable `.github/scripts/settings-apply/` + make it idempotent (PUT-on-exists); new helpers `check-required-variables.sh` + `reconcile-ghcr-visibility.sh`; new `settings-apply.yml` workflow on schedule + dispatch + ruleset/helper path changes; **`sync-config.json` extended** so the new rulesets dir, helper scripts dir, and workflow actually propagate via template-sync (SETTINGS-APPLY) |
+| Rulesets | `default-branch.json` adds `🐳 Docker Build` to required checks (W10 first pass — merge held until W5a is green on partition) |
 | ADRs | ADR-033 (GHCR strategy), ADR-035 (Azure-only Maven profile) |
 | Product specs | `docker-build-workflow-spec.md` only |
 | Design docs | This design doc (`cicd-build-deploy-test-design.md`), `cicd-implementation-plan.md`, Phase 0 notes (`cicd-poc-notes.md` with secret values redacted) |
@@ -1378,9 +1379,10 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 |---|---|
 | Composite actions | New `aks-deploy` (W3), `integration-test` (W4), `cluster-health-check` (W8) |
 | Workflow wiring | `validate.yml` gains `deploy` + `integration-test` jobs (W5b); §5.5 trust-boundary `if:` clause lands here (build job in PR #1 didn't need it); `workflow_dispatch` force-full-pipeline input wired (W13); new `restore-deployment.yml` workflow (W14) |
-| Onboarding (fork-side) | `init.yml` / init-helpers gain `AZURE_*` secret presence check + remaining per-service variables (`ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`) + the deploy/integration-test checks added to the required-checks ruleset (ONBOARD-INIT-B) |
+| Onboarding (fresh forks, fork-side) | `init.yml` / init-helpers gain `AZURE_*` secret presence check + remaining per-service variables (`ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`) (ONBOARD-INIT-B). **No separate ruleset-extension helper** — `setup-rulesets.sh` (now idempotent + relocated by SETTINGS-APPLY in PR #1) PUT-updates the ruleset on each fork from the W10 second-pass JSON via the existing init-time call |
+| Settings reconciliation (existing forks) | `check-required-variables.sh` manifest extended to include `ACCEPTANCE_TEST_*` + `K8S_DEPLOYMENT_NAME` + `K8S_CONTAINER_NAME` + `AZURE_CLIENT_ID`; no new workflow file (settings-apply.yml already shipped in PR #1) |
 | Onboarding (cluster-side) | `spi onboard` subcommand in `osdu-spi-stack` (cross-repo; tracked here as `ONBOARD`) |
-| Rulesets | `default-branch.json` adds `deploy` and `integration-test` to required checks (W10 second pass) |
+| Rulesets | `default-branch.json` adds `🚀 Deploy to spi-stack` + `🧪 Integration Tests` to required checks (W10 second pass — merge held until W5b is green on partition) |
 | ADRs | ADR-032 (Suspended-Flux), ADR-034 (Federated identity), ADR-036 (Trust boundaries) |
 | Product specs | `deploy-workflow-spec.md`, `integration-test-workflow-spec.md` |
 
