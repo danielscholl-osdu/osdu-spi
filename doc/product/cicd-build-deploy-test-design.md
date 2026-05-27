@@ -1004,6 +1004,8 @@ A "service health badge" surfaced on the spi-stack repo README, updated by a 5-m
 
 The work is sequenced in five phases, with explicit exit criteria for each.
 
+**Upstream PR boundaries.** Phase 4 ships to `Azure/osdu-spi` as **two** sequenced PRs cut along the credential boundary (see §5.5, ADR-036). PR #1 ships the build path — everything that runs under `GITHUB_TOKEN` and pushes to GHCR, gated only by Phase 0 gate 0c. PR #2 ships the deploy + integration-test path on top, gated by Phase 0 gates 0a/0b/0d/0e/0f. This sequence lets service forks pick up image-build capability via template-sync as soon as PR #1 lands, so Phase 5 rollout can begin before deploy/test are upstream. See §9.5 for the cut and §9.6 for the rollout entry condition.
+
 ### 9.1 Phase 0 — Manual Proof of Concept
 
 **Effort:** M
@@ -1203,98 +1205,221 @@ What it does, in order (each step is idempotent):
 - Branch-protection ruleset on the target repo
 - Per-service workflow variables for tests (`MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`)
 
-#### 9.4.B Fork-side — extend `init.yml` / init-helpers
+#### 9.4.B Fork-side, fresh forks only — extend `init.yml` / init-helpers
 
-**Lands in:** `osdu-spi` (this repo) &nbsp;|&nbsp; **Effort:** S
+**Lands in:** `osdu-spi` (this repo) &nbsp;|&nbsp; **Effort:** S (split: `ONBOARD-INIT-A` ships in PR #1, `ONBOARD-INIT-B` in PR #2)
 
-The existing template-fork bootstrap (`Use this template` → `init.yml` → init-helpers under `.github/local-actions/init-helpers/`) already configures branches, rulesets, security, sync, and labels. Extend it to cover the new CI/CD prerequisites:
+**Scope.** `init.yml` runs **once** on a fresh fork (template create) and the existing `deploy-fork-resources.sh` deletes the init helpers and `.github/local-actions/` afterwards. There is **no path to re-dispatch `init.yml`** on a fork once initialization completes. Therefore `ONBOARD-INIT-A`/`ONBOARD-INIT-B` are **fresh-fork only** — they read operator-supplied values from `init.yml` inputs, write them to the repo, and let `deploy-fork-resources.sh` clean up. Existing service forks (entitlements, legal, schema, storage, search, indexer, file — already initialized before this CI/CD work) take the **`SETTINGS-APPLY` path** (§9.4.D) for ongoing reconciliation and for first-time CI/CD bootstrap.
 
-1. **GHCR package visibility + retention.** First-time push creates the package as private; init-helpers flip it to public via `gh api -X PATCH` (using the org-package endpoint when `${{ github.repository_owner }}` is an Organization, the user-package endpoint otherwise — see §7.4) and set the retention policy per §8.5.
-2. **Branch-protection ruleset update.** Existing `setup-branch-protection.sh` extended to require the three new checks (`docker-build`, `deploy`, `integration-test`) once they exist on the fork. (W10 lands the rule template; this is the per-fork apply.)
-3. **Per-service variable bootstrap.** init-helpers reads any operator-supplied per-service variables (`MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`) and writes them to the repo. Defaults are documented; required values fail the init job loudly if missing.
-4. **`AZURE_*` secret presence check.** If `AZURE_CLIENT_ID` is not set on the repo, init posts an actionable comment on the initialization issue: *"Run `uv run spi onboard --service <name> --repo <org>/<repo>` from a workstation with Azure + GitHub auth, then re-dispatch this workflow."* This keeps both halves discoverable from inside the fork without coupling them at runtime.
+The existing template-fork bootstrap (`Use this template` → `init.yml` → init-helpers under `.github/local-actions/init-helpers/`) already configures branches, rulesets, security, sync, and labels. The fork-side onboarding extension covers:
+
+1. **GHCR package visibility (no retention).** First-time push creates the package as private; init-helpers flip it to public via `gh api -X PATCH` (org/user endpoint discrimination per §7.4). Retention is handled separately by `W11`'s scheduled `ghcr-retention.yml` workflow, not at init time.
+2. **Per-service variable bootstrap.** Init-helpers read operator-supplied per-service variables from `init.yml` inputs and write them via `gh variable set`:
+   - **Build half (`ONBOARD-INIT-A`, ships in PR #1):** `SERVICE_NAME`, `MAVEN_PROFILE`
+   - **Deploy half (`ONBOARD-INIT-B`, ships in PR #2):** `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`
+   Defaults are documented; required values fail the init job loudly if missing.
+3. **`AZURE_*` secret presence check (`ONBOARD-INIT-B`, ships in PR #2).** If `AZURE_CLIENT_ID` is not set on the repo, init posts an actionable comment on the initialization issue requesting `spi onboard` from a workstation. Soft handshake — does not fail init.
+
+**Out of `ONBOARD-INIT-A`/`-B` scope:**
+- **Ruleset extension** — `W10` owns the canonical JSON data in `.github/rulesets/default-branch.json`; `init-complete.yml`'s existing `setup-rulesets.sh` call POSTs the up-to-date state at init time on fresh forks. The agent must NOT add a "setup-branch-protection" helper for the new checks
+- **GHCR retention** — `W11`'s `ghcr-retention.yml`, not init
+- **Existing-fork propagation** — `SETTINGS-APPLY` (§9.4.D)
 
 **Exit criteria:**
-- "Use this template" on a fresh fork → `init.yml` runs → GHCR public, retention set, ruleset includes the new required checks, per-service variables populated (or init fails loudly with what's missing).
-- Re-dispatching `init.yml` after `spi onboard` has run finds `AZURE_*` present and completes without operator intervention.
+- "Use this template" on a fresh fork → `init.yml` runs with operator-supplied inputs → GHCR public, build-side per-service variables populated, `setup-rulesets.sh` creates rulesets with the up-to-date `default-branch.json` (including the new required-check contexts from W10).
+- Re-dispatching `init.yml` is **not supported** after initialization completes. Subsequent fixes flow through `SETTINGS-APPLY`.
 
-#### 9.4.C Combined operator flow
+#### 9.4.C Combined operator flow (fresh forks)
 
 ```
 # (1) On osdu-spi GitHub UI:
 #     Use this template → create danielscholl-osdu/<service>
-#     First push fires init.yml; if AZURE_* not yet set, init's issue requests onboarding.
+#     Open the init.yml workflow dispatch UI and supply:
+#       SERVICE_NAME, MAVEN_PROFILE,
+#       ACCEPTANCE_TEST_DIR, ACCEPTANCE_TEST_SECRET_MAP, ACCEPTANCE_TEST_DEPENDENCIES
+#     (Operator does NOT supply AZURE_* — those come from spi onboard in step 2.)
+#     init.yml runs end-to-end; ONBOARD-INIT-B posts a "run spi onboard" issue comment if AZURE_* absent.
 
 # (2) From a workstation with Azure + GitHub auth:
 $ uv run spi onboard --service <service> --repo danielscholl-osdu/<service>
+#     spi onboard writes AZURE_*, K8S_DEPLOYMENT_NAME, K8S_CONTAINER_NAME via `gh secret set` / `gh variable set`.
 
 # (3) On the target fork:
-$ gh workflow run init.yml      # re-dispatch; init now finds AZURE_* and completes
+#     The next push (or workflow_dispatch on settings-apply.yml) reconciles state.
+#     settings-apply.yml notices AZURE_CLIENT_ID is now present and closes the human-required issue.
 #     Populate KV secret values out of band (§11 Q2).
 ```
 
 Each side is one command. The split tracks the credential boundary, not artificial repo lines.
 
+#### 9.4.D Existing forks — `SETTINGS-APPLY` reconciliation
+
+**Lands in:** `osdu-spi` (this repo) &nbsp;|&nbsp; **Effort:** M
+
+The seven service forks (entitlements, legal, schema, storage, search, indexer, file) were initialized **before** this CI/CD work. `init.yml`'s helpers were deleted from them, so the `ONBOARD-INIT-A`/`-B` fresh-fork helpers cannot run there. Ruleset updates also don't reach them: `sync.yml` brings file changes into forks via PR, but it does **not** call any GitHub Settings/Rulesets API, and the existing `setup-rulesets.sh` is POST-only (errors HTTP 422 when a ruleset with the same name already exists).
+
+**`SETTINGS-APPLY`** closes both gaps:
+
+1. **Make `setup-rulesets.sh` idempotent** — probe via `GET /repos/{owner}/{repo}/rulesets`, `PUT` if exists, `POST` if not. Add a `--dry-run` mode.
+2. **Preserve `setup-rulesets.sh` post-init** — `deploy-fork-resources.sh` is modified to keep this one helper (and `.github/rulesets/*.json`) in the fork. All other init-only helpers continue to be deleted as today.
+3. **Add `.github/template-workflows/settings-apply.yml`** — a workflow that runs on `schedule` (weekly), `workflow_dispatch`, and `push` to `main` with `paths: ['.github/rulesets/**', '.github/local-actions/init-helpers/setup-rulesets.sh']`. Calls:
+   - The now-idempotent `setup-rulesets.sh` to reconcile `default-branch.json` + `integration-branch.json`
+   - `check-required-variables.sh` to verify each required per-service variable is set; if absent, opens (or updates) an open issue labelled `human-required` listing exactly what's missing
+   - `reconcile-ghcr-visibility.sh` to ensure public GHCR package visibility (mirrors `W2`'s post-push flip; same org/user endpoint discrimination)
+   - Step summary capturing what was reconciled, what changed, what's still missing
+
+**Triggering on an existing fork after this work lands:**
+
+```
+# Path A — template-sync brings the updated rulesets JSON / setup-rulesets.sh / settings-apply.yml.
+#     Operator merges the sync PR; the push triggers settings-apply.yml on the merge commit.
+
+# Path B — operator manually dispatches:
+$ gh workflow run settings-apply.yml -R <org>/<service>
+
+# Path C — scheduled weekly run reconciles drift.
+```
+
+For variables the operator must set out of band, `settings-apply.yml` opens an issue. The operator runs `gh variable set NAME=value` (or uses the Settings UI), then re-dispatches `settings-apply.yml`; the issue closes when all required variables are present.
+
+**Exit criteria:**
+- Each existing service fork has `settings-apply.yml` running on schedule + dispatch + ruleset path changes.
+- A ruleset JSON update at `Azure/osdu-spi` propagates to existing forks via template-sync PR → merge → `settings-apply.yml` → PUT-update of the existing ruleset.
+- An existing fork without `MAVEN_PROFILE` (or any required variable) gets a `human-required: settings-apply` issue listing what's missing, instead of CI silently building wrong artifacts.
+
+**Out of `SETTINGS-APPLY` scope:**
+- Cross-fork orchestration (each fork reconciles itself)
+- Auto-setting required variable *values* (the workflow surfaces what's missing; operators populate values)
+- Modifying `sync.yml` (template-sync's role is unchanged — it brings files; `settings-apply.yml` applies them)
+- Cluster-side IAM (`ONBOARD` in `osdu-spi-stack`)
+
 ### 9.5 Phase 4 — PR Back to Official `Azure/osdu-spi`
 
-**Effort:** S (mostly coordination; no new code beyond what Phase 2 produced)
-**Goal:** Land the validated design in the official engineering system.
+**Goal:** Land the validated design in the official engineering system in two sequenced PRs.
 
-**Pre-step — re-check ADR numbering:**
-The design proposes ADR-032 through ADR-035 (and ADR-036 for security/trust boundaries — see §12 Appendix B). The latest ADR in `Azure/osdu-spi` at the time of writing this design was 031. Before opening the PR, run:
+**Why two PRs.** The cut runs along the credential boundary (§5.5, ADR-036). PR #1 ("Build to GHCR") is everything that runs under `GITHUB_TOKEN` and produces container images; nothing in it touches Azure or the cluster. PR #2 ("Deploy + Integration Test") adds the cluster-deploy path on top, including the trust-boundary `if:` clause and federated identity. A single combined PR would couple two concerns with very different review surfaces — one is "is the docker build right?", the other is "is the deploy attack surface right?" — and would force PR #2's Phase 0 gates (0a/0b/0d/0e/0f) to delay everything in PR #1, which only needs gate 0c.
+
+A side benefit: once PR #1 merges, service forks pick up image-build capability via template-sync immediately. Phase 5 rollout can start there. Deploy/integration-test become required checks per-fork only after PR #2 also lands and `ONBOARD-INIT-B` runs.
+
+**Pre-step — re-check ADR numbering (applies to both PRs):**
+The design proposes ADR-032 through ADR-036 (see §12 Appendix B). The latest ADR in `Azure/osdu-spi` at the time of writing this design was 031. Before opening either PR, run:
 ```
 ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 ```
-…and renumber the new ADRs if upstream has merged additional ones in the interim.
+…and renumber the new ADRs if upstream has merged additional ones in the interim. Renumbering must be consistent across both PRs (cross-references in PR #2 must point at PR #1's final numbers).
+
+#### 9.5.A Phase 4a — Upstream PR #1: Build to GHCR
+
+**Effort:** S
+**Phase 0 gate that blocks:** 0c only (Azure org policy on public GHCR packages)
+
+**Scope — everything below this line ships in PR #1, nothing else:**
+
+| Layer | Contents |
+|---|---|
+| Composite actions | `java-build` (`maven_profile` input added — W1), new `docker-build` action (W2) |
+| Workflow wiring | `validate.yml` gains the `docker-build` job only — no `if:` trust-boundary gating (build is safe on PRs); no deploy/integration-test jobs yet (W5a) |
+| Other workflows | `release.yml` adds the `:<version>` re-tag step (W7); new `ghcr-retention.yml` scheduled workflow (W11) |
+| Onboarding (fork-side) | `init.yml` / init-helpers gain GHCR visibility flip + retention + `SERVICE_NAME`/`MAVEN_PROFILE` per-service variable bootstrap + the docker-build check added to the required-checks ruleset (ONBOARD-INIT-A) |
+| Rulesets | `default-branch.json` adds `docker-build` to required checks (W10 first pass) |
+| ADRs | ADR-033 (GHCR strategy), ADR-035 (Azure-only Maven profile) |
+| Product specs | `docker-build-workflow-spec.md` only |
+| Design docs | This design doc (`cicd-build-deploy-test-design.md`), `cicd-implementation-plan.md`, Phase 0 notes (`cicd-poc-notes.md` with secret values redacted) |
 
 **Steps:**
 
-1. **Diff sandbox vs official:**
+1. **Diff sandbox vs upstream, scoped to PR #1 paths:**
    ```
    git remote add upstream https://github.com/Azure/osdu-spi
    git fetch upstream main
-   git diff upstream/main..main -- .github/template-workflows/ .github/actions/
+   git diff upstream/main..main -- \
+     .github/actions/java-build/ \
+     .github/actions/docker-build/ \
+     .github/template-workflows/validate.yml \
+     .github/template-workflows/release.yml \
+     .github/template-workflows/ghcr-retention.yml \
+     .github/workflows/init.yml \
+     .github/local-actions/init-helpers/setup-ghcr-visibility.sh \
+     .github/local-actions/init-helpers/setup-service-variables.sh \
+     .github/rulesets/default-branch.json \
+     doc/src/adr/033-*.md doc/src/adr/035-*.md \
+     doc/product/docker-build-workflow-spec.md \
+     doc/product/
    ```
-   Confirm only the intended changes (no stray fork-resource updates leaking in).
+   Confirm only PR #1 changes appear. If `validate.yml` includes deploy/integration-test job stanzas, the cut wasn't taken cleanly — those belong in PR #2.
 
-2. **Open PR against Azure/osdu-spi** with:
-   - All template-workflow changes (validate.yml additions only, per D12)
-   - All composite action additions (`docker-build`, `aks-deploy`, `integration-test`, `cluster-health-check`)
-   - `java-build` action change (new `maven_profile` input)
-   - Ruleset changes for required-check enforcement (W10)
-   - GHCR retention scheduled workflow (W11)
-   - **New ADRs:** drafts in §12 Appendix B (ADR-032 through ADR-036, renumbered per pre-step if needed)
-   - **New product specs:** `docker-build-workflow-spec.md`, `deploy-workflow-spec.md`, `integration-test-workflow-spec.md`
-   - Updates to `architecture.md`, `workflow-strategy.md`
-   - This design doc itself (`cicd-build-deploy-test-design.md`) + Phase 0 notes (`cicd-poc-notes.md`, with secret values redacted)
+2. **Open PR #1 against `Azure/osdu-spi`** with the layer table above as the PR description outline.
 
-3. **Pre-merge checks:**
-   - All existing service forks are notified (announcement issue or comment in each, scripted)
-   - Operators are aware they'll need to provision managed identity per service before their next PR (linked: §6.1 + onboarding command)
-   - Sandbox proof points referenced in PR description (link to 10+ green runs)
-   - Compliance sign-off for GHCR-public visibility captured (gate 0c)
+3. **Pre-merge checks (PR #1):**
+   - Sandbox proof points referenced: 10+ build-green runs on partition (build pipeline only; deploy not required green for this PR)
+   - Compliance sign-off for GHCR public visibility captured (Phase 0 gate 0c)
+   - Existing service forks notified that template-sync will bring `docker-build` to them; they will start producing images but no cluster effect (no deploy job yet)
 
-4. **Merge sequence:**
-   - Merge ADRs first (documentation, no risk)
-   - Merge composite actions second (code, but no triggers wired)
-   - Merge template-workflows last (live trigger change)
+4. **Merge sequence (PR #1):**
+   - ADR-033, ADR-035 first (documentation)
+   - `java-build` change + `docker-build` action + `ghcr-retention.yml` + ONBOARD-INIT-A helpers (code, no live trigger change yet)
+   - `validate.yml` docker-build wiring + ruleset update last (live trigger change)
 
-**Exit criteria:**
-- PR merged
-- Official `Azure/osdu-spi` template-sync run propagates to existing service forks (partition will get the change — should be a no-op since it already has the equivalent from sandbox)
+**Exit criteria (PR #1):**
+- PR #1 merged to `Azure/osdu-spi/main`
+- Template-sync run propagates to existing service forks; their `docker-build` job runs green on the next PR
+- `default-branch.json` ruleset update reaches forks; `docker-build` is now a required check
+- No regression in existing `validate.yml` or `release.yml` behaviour (java-build still runs without `maven_profile` set, release.yml still produces the existing artifacts)
 
-**Sandbox lifecycle after merge:**
+#### 9.5.B Phase 4b — Upstream PR #2: Deploy + Integration Test
+
+**Effort:** S
+**Entry condition:** PR #1 merged upstream.
+**Phase 0 gates that block:** 0a (Deployment naming), 0b (AKS auth mode), 0d (gateway DNS), 0e (test isolation), 0f (operator RBAC). Plus Phase 0 step 4a (OIDC validation green for all required event subjects).
+
+**Scope — everything below this line ships in PR #2:**
+
+| Layer | Contents |
+|---|---|
+| Composite actions | New `aks-deploy` (W3), `integration-test` (W4), `cluster-health-check` (W8) |
+| Workflow wiring | `validate.yml` gains `deploy` + `integration-test` jobs (W5b); §5.5 trust-boundary `if:` clause lands here (build job in PR #1 didn't need it); `workflow_dispatch` force-full-pipeline input wired (W13); new `restore-deployment.yml` workflow (W14) |
+| Onboarding (fork-side) | `init.yml` / init-helpers gain `AZURE_*` secret presence check + remaining per-service variables (`ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`) + the deploy/integration-test checks added to the required-checks ruleset (ONBOARD-INIT-B) |
+| Onboarding (cluster-side) | `spi onboard` subcommand in `osdu-spi-stack` (cross-repo; tracked here as `ONBOARD`) |
+| Rulesets | `default-branch.json` adds `deploy` and `integration-test` to required checks (W10 second pass) |
+| ADRs | ADR-032 (Suspended-Flux), ADR-034 (Federated identity), ADR-036 (Trust boundaries) |
+| Product specs | `deploy-workflow-spec.md`, `integration-test-workflow-spec.md` |
+
+**Steps:**
+
+1. **Diff sandbox vs upstream**, scoped to PR #2 paths (mirror of PR #1's diff command but against the deploy/integration-test artefacts). Confirm no PR #1 changes are revisited.
+
+2. **Open PR #2 against `Azure/osdu-spi`** with the layer table above. Cross-link to PR #1 in the description.
+
+3. **Pre-merge checks (PR #2):**
+   - Sandbox proof points: 10+ deploy-green runs on partition (full pipeline; integration-test required green)
+   - `spi onboard` (in `osdu-spi-stack`) merged and validated against at least one service fork end-to-end
+   - All five Phase 0 gates closed (0a, 0b, 0d, 0e, 0f); Phase 0 step 4a OIDC validation green on main push / feature push / PR sync / tag push subjects
+   - Existing service forks notified that they'll need to run `spi onboard` from `osdu-spi-stack` and re-dispatch `init.yml` before the new required checks start blocking merges
+
+4. **Merge sequence (PR #2):**
+   - ADR-032, ADR-034, ADR-036 first (documentation)
+   - `aks-deploy` + `integration-test` + `cluster-health-check` actions + `restore-deployment.yml` (code, no live trigger change yet)
+   - `validate.yml` deploy/integration-test wiring + ONBOARD-INIT-B helpers + ruleset update last (live trigger change + required-check change)
+
+**Exit criteria (PR #2):**
+- PR #2 merged to `Azure/osdu-spi/main`
+- `default-branch.json` ruleset update reaches forks; `deploy` and `integration-test` are now required checks (will block merges only on forks that have completed cluster-side onboarding)
+- A PR with intentionally failing integration test on the partition fork cannot merge to `main`
+
+#### 9.5.C Sandbox lifecycle after both PRs merge
 
 The sandbox (`danielscholl-osdu/osdu-spi`) is **kept long-lived** rather than archived, for two reasons:
-1. Future template changes can be developed and validated against `danielscholl-osdu/partition` before PRing back to `Azure/osdu-spi` — the same risk-isolation pattern that this design needed.
+1. Future template changes can be developed and validated against `danielscholl-osdu/partition` before PRing back to `Azure/osdu-spi` — the same risk-isolation pattern this design needed.
 2. The sandbox absorbs upstream changes daily (template-sync from `Azure/osdu-spi`) so it stays current.
 
-`danielscholl-osdu/partition`'s `TEMPLATE_REPO_URL` is **switched back to `Azure/osdu-spi`** after this PR merges. The sandbox keeps tracking upstream but no longer feeds partition. To use the sandbox again later (for another template change), the variable can be re-pointed.
+`danielscholl-osdu/partition`'s `TEMPLATE_REPO_URL` is **switched back to `Azure/osdu-spi`** after PR #2 merges. The sandbox keeps tracking upstream but no longer feeds partition. To use the sandbox again later (for another template change), the variable can be re-pointed.
 
 ### 9.6 Phase 5 — Rollout to Remaining Services
 
 **Effort:** M total — each service is S (initialize + onboard + per-service audit + first CI run); 7 services, parallelizable across operators
 **Goal:** All 8 services on the new CI loop.
+
+**Entry condition:** Phase 5 starts when **Phase 4a (PR #1) merges upstream**, not when both PRs land. Each new service fork can be initialized and the build-only half of the pipeline becomes a required check immediately (PR #1 ruleset). The deploy + integration-test half of each service goes live per-fork after Phase 4b merges *and* the operator has run `spi onboard` + re-dispatched `init.yml` so `ONBOARD-INIT-B` populates `AZURE_*` and the remaining per-service variables. Forks that haven't completed cluster-side onboarding when PR #2 lands continue to ship green builds; their deploy/integration-test checks remain pending until they onboard.
 
 **Order (by dependency, not alphabet — so each newly-onboarded service has its acceptance-test dependencies already running):**
 
@@ -1309,14 +1434,27 @@ The sandbox (`danielscholl-osdu/osdu-spi`) is **kept long-lived** rather than ar
 
 Indexer and Search are coupled for event-driven indexing — both can deploy independently but acceptance tests for one may need the other running. Onboard search first so its gateway is healthy by the time indexer's tests run.
 
-Per service:
-- Initialize fork from `Azure/osdu-spi` (existing init workflow, ADR-006)
-- **Per-service audit** (one-time): capture `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, test data isolation strategy (§8.8). Document in `doc/product/service-onboarding-<service>.md`.
-- Run cluster-side onboarding (`uv run spi onboard --service <name> --repo <org>/<name> ...`) — Phase 3 Deliverable A
-- Re-dispatch `init.yml` on the fork so Phase 3 Deliverable B completes (GHCR + ruleset + per-service vars)
-- Populate per-service KV secrets (one-time, manual or via stack provisioning)
-- Verify first CI run on the new fork's main goes green
-- Update §8.8 isolation status table
+**Per service — two flows depending on initialization state:**
+
+*Flow A — Existing forks (entitlements, legal, schema, storage, search, indexer, file).* These were initialized before this CI/CD work; `init.yml` is no longer available. Onboarding goes through `SETTINGS-APPLY`:
+
+- **Per-service audit** (one-time): capture `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`, test data isolation strategy (§8.8). Document in `doc/product/service-onboarding-<service>.md`.
+- Run cluster-side onboarding from a workstation: `uv run spi onboard --service <name> --repo <org>/<name> ...` writes `AZURE_*` + `K8S_*` (Phase 3 Deliverable A / §9.4.A).
+- Wait for the next template-sync PR to deliver `settings-apply.yml` (or, if already present, run `gh workflow run settings-apply.yml -R <org>/<name>`). The workflow opens a `human-required: settings-apply` issue listing the per-service variables still missing.
+- Run `gh variable set` for each missing variable per the audit (or use the Settings UI). Re-dispatch `settings-apply.yml`; the issue closes when all required variables are present.
+- Populate per-service KV secrets (one-time, manual or via stack provisioning).
+- Verify first CI run on the fork's main goes green.
+- Update §8.8 isolation status table.
+
+*Flow B — Fresh forks (any new service started after this work lands; partition started as Flow B in the sandbox).* `init.yml` is still in the fork:
+
+- "Use this template" → on `init.yml`'s workflow_dispatch UI, supply the per-service variables (`SERVICE_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`). `ONBOARD-INIT-A`/`-B` runs them at init time; rulesets POST via `setup-rulesets.sh`.
+- Run cluster-side onboarding from a workstation (same `spi onboard` command as Flow A).
+- `settings-apply.yml`'s next scheduled run (or a manual dispatch) reconciles `AZURE_*` presence and closes any open human-required issue.
+- Populate per-service KV secrets out of band.
+- Verify first CI run.
+
+Both flows converge on the same steady state: every fork has the up-to-date rulesets, all required variables/secrets, and `settings-apply.yml` for ongoing drift correction.
 
 **Exit criteria:**
 - All 8 services have green CI loops on a representative event (PR open + merge to main)
@@ -1332,7 +1470,8 @@ Per service:
 | Phase 1 — Sandbox setup | **XS** | One verify step left |
 | Phase 2 — Workflow implementation | **L** | 13 work items; mostly XS/S/M individually, parallelizable per [`cicd-implementation-plan.md`](./cicd-implementation-plan.md) |
 | Phase 3 — Onboarding split: cluster-side `spi onboard` (M, cross-repo) + fork-side `init.yml` extension (S, this repo) | **M+S** | Two halves along the credential boundary — see §9.4 |
-| Phase 4 — PR back to official | **S** | Coordination + diff + ADR renumbering |
+| Phase 4a — Upstream PR #1 (Build to GHCR) | **S** | Coordination + diff + ADR renumbering; gated by Phase 0 0c only |
+| Phase 4b — Upstream PR #2 (Deploy + Integration Test) | **S** | Coordination + diff; gated by Phase 0 0a/0b/0d/0e/0f + step 4a |
 | Phase 5 — Per-service rollout | **M** | Each service is S; 7 services, parallelizable across operators |
 
 T-shirt sizes describe **effort scale**, not wall-clock time. Real elapsed time depends on operator count, review cycles, and how many gate answers from Phase 0 trigger Phase 2 revisions. See the implementation plan for per-sub-issue sizing.
