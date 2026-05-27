@@ -1004,7 +1004,7 @@ A "service health badge" surfaced on the spi-stack repo README, updated by a 5-m
 
 The work is sequenced in five phases, with explicit exit criteria for each.
 
-**Upstream PR boundaries.** Phase 4 ships to `Azure/osdu-spi` as **two** sequenced PRs cut along the credential boundary (see §5.5, ADR-036). PR #1 ships the build path — everything that runs under `GITHUB_TOKEN` and pushes to GHCR, gated only by Phase 0 gate 0c. PR #2 ships the deploy + integration-test path on top, gated by Phase 0 gates 0a/0b/0d/0e/0f. This sequence lets service forks pick up image-build capability via template-sync as soon as PR #1 lands, so Phase 5 rollout can begin before deploy/test are upstream. See §9.5 for the cut and §9.6 for the rollout entry condition.
+**Upstream PR boundaries.** Phase 4 ships to `Azure/osdu-spi` as **two** sequenced PRs cut along the credential boundary (see §5.5, ADR-036). the Build PR ships the build path — everything that runs under `GITHUB_TOKEN` and pushes to GHCR, gated only by Phase 0 gate 0c. the Deploy PR ships the deploy + integration-test path on top, gated by Phase 0 gates 0a/0b/0d/0e/0f. This sequence lets service forks pick up image-build capability via template-sync as soon as the Build PR lands, so Phase 5 rollout can begin before deploy/test are upstream. See §9.5 for the cut and §9.6 for the rollout entry condition.
 
 ### 9.1 Phase 0 — Manual Proof of Concept
 
@@ -1207,7 +1207,7 @@ What it does, in order (each step is idempotent):
 
 #### 9.4.B Fork-side, fresh forks only — extend `init.yml` / init-helpers
 
-**Lands in:** `osdu-spi` (this repo) &nbsp;|&nbsp; **Effort:** S (split: `ONBOARD-INIT-A` ships in PR #1, `ONBOARD-INIT-B` in PR #2)
+**Lands in:** `osdu-spi` (this repo) &nbsp;|&nbsp; **Effort:** S (split: `ONBOARD-INIT-A` ships in Build PR, `ONBOARD-INIT-B` in Deploy PR)
 
 **Scope.** `init.yml` runs **once** on a fresh fork (template create) and the existing `deploy-fork-resources.sh` deletes the init helpers and `.github/local-actions/` afterwards. There is **no path to re-dispatch `init.yml`** on a fork once initialization completes. Therefore `ONBOARD-INIT-A`/`ONBOARD-INIT-B` are **fresh-fork only** — they read operator-supplied values from `init.yml` inputs, write them to the repo, and let `deploy-fork-resources.sh` clean up. Existing service forks (entitlements, legal, schema, storage, search, indexer, file — already initialized before this CI/CD work) take the **`SETTINGS-APPLY` path** (§9.4.D) for ongoing reconciliation and for first-time CI/CD bootstrap.
 
@@ -1215,10 +1215,10 @@ The existing template-fork bootstrap (`Use this template` → `init.yml` → ini
 
 1. **GHCR package visibility (no retention).** First-time push creates the package as private; init-helpers flip it to public via `gh api -X PATCH` (org/user endpoint discrimination per §7.4). Retention is handled separately by `W11`'s scheduled `ghcr-retention.yml` workflow, not at init time.
 2. **Per-service variable bootstrap.** Init-helpers read operator-supplied per-service variables from `init.yml` inputs and write them via `gh variable set`:
-   - **Build half (`ONBOARD-INIT-A`, ships in PR #1):** `SERVICE_NAME`, `MAVEN_PROFILE`
-   - **Deploy half (`ONBOARD-INIT-B`, ships in PR #2):** `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`
+   - **Build half (`ONBOARD-INIT-A`, ships in Build PR):** `SERVICE_NAME`, `MAVEN_PROFILE`
+   - **Deploy half (`ONBOARD-INIT-B`, ships in Deploy PR):** `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`
    Defaults are documented; required values fail the init job loudly if missing.
-3. **`AZURE_*` secret presence check (`ONBOARD-INIT-B`, ships in PR #2).** If `AZURE_CLIENT_ID` is not set on the repo, init posts an actionable comment on the initialization issue requesting `spi onboard` from a workstation. Soft handshake — does not fail init.
+3. **`AZURE_*` secret presence check (`ONBOARD-INIT-B`, ships in Deploy PR).** If `AZURE_CLIENT_ID` is not set on the repo, init posts an actionable comment on the initialization issue requesting `spi onboard` from a workstation. Soft handshake — does not fail init.
 
 **Out of `ONBOARD-INIT-A`/`-B` scope:**
 - **Ruleset extension** — `W10` owns the canonical JSON data in `.github/rulesets/default-branch.json`; `init-complete.yml`'s existing `setup-rulesets.sh` call POSTs the up-to-date state at init time on fresh forks. The agent must NOT add a "setup-branch-protection" helper for the new checks
@@ -1297,23 +1297,23 @@ For variables the operator must set out of band, `settings-apply.yml` opens an i
 
 **Goal:** Land the validated design in the official engineering system in two sequenced PRs.
 
-**Why two PRs.** The cut runs along the credential boundary (§5.5, ADR-036). PR #1 ("Build to GHCR") is everything that runs under `GITHUB_TOKEN` and produces container images; nothing in it touches Azure or the cluster. PR #2 ("Deploy + Integration Test") adds the cluster-deploy path on top, including the trust-boundary `if:` clause and federated identity. A single combined PR would couple two concerns with very different review surfaces — one is "is the docker build right?", the other is "is the deploy attack surface right?" — and would force PR #2's Phase 0 gates (0a/0b/0d/0e/0f) to delay everything in PR #1, which only needs gate 0c.
+**Why two PRs.** The cut runs along the credential boundary (§5.5, ADR-036). the Build PR ("Build to GHCR") is everything that runs under `GITHUB_TOKEN` and produces container images; nothing in it touches Azure or the cluster. the Deploy PR ("Deploy + Integration Test") adds the cluster-deploy path on top, including the trust-boundary `if:` clause and federated identity. A single combined PR would couple two concerns with very different review surfaces — one is "is the docker build right?", the other is "is the deploy attack surface right?" — and would force the Deploy PR's Phase 0 gates (0a/0b/0d/0e/0f) to delay everything in the Build PR, which only needs gate 0c.
 
-A side benefit: once PR #1 merges, service forks pick up image-build capability via template-sync immediately. Phase 5 rollout can start there. Deploy/integration-test become required checks per-fork only after PR #2 also lands and `ONBOARD-INIT-B` runs.
+A side benefit: once the Build PR merges, service forks pick up image-build capability via template-sync immediately. Phase 5 rollout can start there. Deploy/integration-test become required checks per-fork only after the Deploy PR also lands and `ONBOARD-INIT-B` runs.
 
 **Pre-step — re-check ADR numbering (applies to both PRs):**
 The design proposes ADR-032 through ADR-036 (see §12 Appendix B). The latest ADR in `Azure/osdu-spi` at the time of writing this design was 031. Before opening either PR, run:
 ```
 ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 ```
-…and renumber the new ADRs if upstream has merged additional ones in the interim. Renumbering must be consistent across both PRs (cross-references in PR #2 must point at PR #1's final numbers).
+…and renumber the new ADRs if upstream has merged additional ones in the interim. Renumbering must be consistent across both PRs (cross-references in the Deploy PR must point at the Build PR's final numbers).
 
-#### 9.5.A Phase 4a — Upstream PR #1: Build to GHCR
+#### 9.5.A Phase 4a — Build PR
 
 **Effort:** S
 **Phase 0 gate that blocks:** 0c only (Azure org policy on public GHCR packages)
 
-**Scope — everything below this line ships in PR #1, nothing else:**
+**Scope — everything below this line ships in Build PR, nothing else:**
 
 | Layer | Contents |
 |---|---|
@@ -1329,7 +1329,7 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 
 **Steps:**
 
-1. **Diff sandbox vs upstream, scoped to PR #1 paths:**
+1. **Diff sandbox vs upstream, scoped to Build PR paths:**
    ```
    git remote add upstream https://github.com/Azure/osdu-spi
    git fetch upstream main
@@ -1347,40 +1347,40 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
      doc/product/docker-build-workflow-spec.md \
      doc/product/
    ```
-   Confirm only PR #1 changes appear. If `validate.yml` includes deploy/integration-test job stanzas, the cut wasn't taken cleanly — those belong in PR #2.
+   Confirm only Build PR changes appear. If `validate.yml` includes deploy/integration-test job stanzas, the cut wasn't taken cleanly — those belong in Deploy PR.
 
-2. **Open PR #1 against `Azure/osdu-spi`** with the layer table above as the PR description outline.
+2. **Open the Build PR against `Azure/osdu-spi`** with the layer table above as the PR description outline.
 
-3. **Pre-merge checks (PR #1):**
+3. **Pre-merge checks (Build PR):**
    - Sandbox proof points referenced: 10+ build-green runs on partition (build pipeline only; deploy not required green for this PR)
    - Compliance sign-off for GHCR public visibility captured (Phase 0 gate 0c)
    - Existing service forks notified that template-sync will bring `docker-build` to them; they will start producing images but no cluster effect (no deploy job yet)
 
-4. **Merge sequence (PR #1):**
+4. **Merge sequence (Build PR):**
    - ADR-033, ADR-035 first (documentation)
    - `java-build` change + `docker-build` action + `ghcr-retention.yml` + ONBOARD-INIT-A helpers (code, no live trigger change yet)
    - `validate.yml` docker-build wiring + ruleset update last (live trigger change)
 
-**Exit criteria (PR #1):**
-- PR #1 merged to `Azure/osdu-spi/main`
+**Exit criteria (Build PR):**
+- Build PR merged to `Azure/osdu-spi/main`
 - Template-sync run propagates to existing service forks; their `docker-build` job runs green on the next PR
 - `default-branch.json` ruleset update reaches forks; `docker-build` is now a required check
 - No regression in existing `validate.yml` or `release.yml` behaviour (java-build still runs without `maven_profile` set, release.yml still produces the existing artifacts)
 
-#### 9.5.B Phase 4b — Upstream PR #2: Deploy + Integration Test
+#### 9.5.B Phase 4b — Deploy PR
 
 **Effort:** S
-**Entry condition:** PR #1 merged upstream.
+**Entry condition:** Build PR merged upstream.
 **Phase 0 gates that block:** 0a (Deployment naming), 0b (AKS auth mode), 0d (gateway DNS), 0e (test isolation), 0f (operator RBAC). Plus Phase 0 step 4a (OIDC validation green for all required event subjects).
 
-**Scope — everything below this line ships in PR #2:**
+**Scope — everything below this line ships in Deploy PR:**
 
 | Layer | Contents |
 |---|---|
 | Composite actions | New `aks-deploy` (W3), `integration-test` (W4), `cluster-health-check` (W8) |
-| Workflow wiring | `validate.yml` gains `deploy` + `integration-test` jobs (W5b); §5.5 trust-boundary `if:` clause lands here (build job in PR #1 didn't need it); `workflow_dispatch` force-full-pipeline input wired (W13); new `restore-deployment.yml` workflow (W14) |
-| Onboarding (fresh forks, fork-side) | `init.yml` / init-helpers gain `AZURE_*` secret presence check + remaining per-service variables (`ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`) (ONBOARD-INIT-B). **No separate ruleset-extension helper** — `setup-rulesets.sh` (now idempotent + relocated by SETTINGS-APPLY in PR #1) PUT-updates the ruleset on each fork from the W10 second-pass JSON via the existing init-time call |
-| Settings reconciliation (existing forks) | `check-required-variables.sh` manifest extended to include `ACCEPTANCE_TEST_*` + `K8S_DEPLOYMENT_NAME` + `K8S_CONTAINER_NAME` + `AZURE_CLIENT_ID`; no new workflow file (settings-apply.yml already shipped in PR #1) |
+| Workflow wiring | `validate.yml` gains `deploy` + `integration-test` jobs (W5b); §5.5 trust-boundary `if:` clause lands here (build job in the Build PR didn't need it); `workflow_dispatch` force-full-pipeline input wired (W13); new `restore-deployment.yml` workflow (W14) |
+| Onboarding (fresh forks, fork-side) | `init.yml` / init-helpers gain `AZURE_*` secret presence check + remaining per-service variables (`ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`) (ONBOARD-INIT-B). **No separate ruleset-extension helper** — `setup-rulesets.sh` (now idempotent + relocated by SETTINGS-APPLY in Build PR) PUT-updates the ruleset on each fork from the W10 second-pass JSON via the existing init-time call |
+| Settings reconciliation (existing forks) | `check-required-variables.sh` manifest extended to include `ACCEPTANCE_TEST_*` + `K8S_DEPLOYMENT_NAME` + `K8S_CONTAINER_NAME` + `AZURE_CLIENT_ID`; no new workflow file (settings-apply.yml already shipped in Build PR) |
 | Onboarding (cluster-side) | `spi onboard` subcommand in `osdu-spi-stack` (cross-repo; tracked here as `ONBOARD`) |
 | Rulesets | `default-branch.json` adds `🚀 Deploy to spi-stack` + `🧪 Integration Tests` to required checks (W10 second pass — merge held until W5b is green on partition) |
 | ADRs | ADR-032 (Suspended-Flux), ADR-034 (Federated identity), ADR-036 (Trust boundaries) |
@@ -1388,23 +1388,23 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 
 **Steps:**
 
-1. **Diff sandbox vs upstream**, scoped to PR #2 paths (mirror of PR #1's diff command but against the deploy/integration-test artefacts). Confirm no PR #1 changes are revisited.
+1. **Diff sandbox vs upstream**, scoped to Deploy PR paths (mirror of the Build PR's diff command but against the deploy/integration-test artefacts). Confirm no Build PR changes are revisited.
 
-2. **Open PR #2 against `Azure/osdu-spi`** with the layer table above. Cross-link to PR #1 in the description.
+2. **Open the Deploy PR against `Azure/osdu-spi`** with the layer table above. Cross-link to the Build PR in the description.
 
-3. **Pre-merge checks (PR #2):**
+3. **Pre-merge checks (Deploy PR):**
    - Sandbox proof points: 10+ deploy-green runs on partition (full pipeline; integration-test required green)
    - `spi onboard` (in `osdu-spi-stack`) merged and validated against at least one service fork end-to-end
    - All five Phase 0 gates closed (0a, 0b, 0d, 0e, 0f); Phase 0 step 4a OIDC validation green on main push / feature push / PR sync / tag push subjects
    - Existing service forks notified that they'll need to run `spi onboard` from `osdu-spi-stack` and re-dispatch `init.yml` before the new required checks start blocking merges
 
-4. **Merge sequence (PR #2):**
+4. **Merge sequence (Deploy PR):**
    - ADR-032, ADR-034, ADR-036 first (documentation)
    - `aks-deploy` + `integration-test` + `cluster-health-check` actions + `restore-deployment.yml` (code, no live trigger change yet)
    - `validate.yml` deploy/integration-test wiring + ONBOARD-INIT-B helpers + ruleset update last (live trigger change + required-check change)
 
-**Exit criteria (PR #2):**
-- PR #2 merged to `Azure/osdu-spi/main`
+**Exit criteria (Deploy PR):**
+- the Deploy PR merged to `Azure/osdu-spi/main`
 - `default-branch.json` ruleset update reaches forks; `deploy` and `integration-test` are now required checks (will block merges only on forks that have completed cluster-side onboarding)
 - A PR with intentionally failing integration test on the partition fork cannot merge to `main`
 
@@ -1414,14 +1414,14 @@ The sandbox (`danielscholl-osdu/osdu-spi`) is **kept long-lived** rather than ar
 1. Future template changes can be developed and validated against `danielscholl-osdu/partition` before PRing back to `Azure/osdu-spi` — the same risk-isolation pattern this design needed.
 2. The sandbox absorbs upstream changes daily (template-sync from `Azure/osdu-spi`) so it stays current.
 
-`danielscholl-osdu/partition`'s `TEMPLATE_REPO_URL` is **switched back to `Azure/osdu-spi`** after PR #2 merges. The sandbox keeps tracking upstream but no longer feeds partition. To use the sandbox again later (for another template change), the variable can be re-pointed.
+`danielscholl-osdu/partition`'s `TEMPLATE_REPO_URL` is **switched back to `Azure/osdu-spi`** after the Deploy PR merges. The sandbox keeps tracking upstream but no longer feeds partition. To use the sandbox again later (for another template change), the variable can be re-pointed.
 
 ### 9.6 Phase 5 — Rollout to Remaining Services
 
 **Effort:** M total — each service is S (initialize + onboard + per-service audit + first CI run); 7 services, parallelizable across operators
 **Goal:** All 8 services on the new CI loop.
 
-**Entry condition:** Phase 5 starts when **Phase 4a (PR #1) merges upstream**, not when both PRs land. Each new service fork can be initialized and the build-only half of the pipeline becomes a required check immediately (PR #1 ruleset). The deploy + integration-test half of each service goes live per-fork after Phase 4b merges *and* the operator has run `spi onboard` + re-dispatched `init.yml` so `ONBOARD-INIT-B` populates `AZURE_*` and the remaining per-service variables. Forks that haven't completed cluster-side onboarding when PR #2 lands continue to ship green builds; their deploy/integration-test checks remain pending until they onboard.
+**Entry condition:** Phase 5 starts when **Phase 4a (Build PR) merges upstream**, not when both PRs land. Each new service fork can be initialized and the build-only half of the pipeline becomes a required check immediately (Build PR ruleset). The deploy + integration-test half of each service goes live per-fork after Phase 4b merges *and* the operator has run `spi onboard` + re-dispatched `init.yml` so `ONBOARD-INIT-B` populates `AZURE_*` and the remaining per-service variables. Forks that haven't completed cluster-side onboarding when the Deploy PR lands continue to ship green builds; their deploy/integration-test checks remain pending until they onboard.
 
 **Order (by dependency, not alphabet — so each newly-onboarded service has its acceptance-test dependencies already running):**
 
@@ -1472,8 +1472,8 @@ Both flows converge on the same steady state: every fork has the up-to-date rule
 | Phase 1 — Sandbox setup | **XS** | One verify step left |
 | Phase 2 — Workflow implementation | **L** | 13 work items; mostly XS/S/M individually, parallelizable per [`cicd-implementation-plan.md`](./cicd-implementation-plan.md) |
 | Phase 3 — Onboarding split: cluster-side `spi onboard` (M, cross-repo) + fork-side `init.yml` extension (S, this repo) | **M+S** | Two halves along the credential boundary — see §9.4 |
-| Phase 4a — Upstream PR #1 (Build to GHCR) | **S** | Coordination + diff + ADR renumbering; gated by Phase 0 0c only |
-| Phase 4b — Upstream PR #2 (Deploy + Integration Test) | **S** | Coordination + diff; gated by Phase 0 0a/0b/0d/0e/0f + step 4a |
+| Phase 4a — Build PR (Build to GHCR) | **S** | Coordination + diff + ADR renumbering; gated by Phase 0 0c only |
+| Phase 4b — Deploy PR (Deploy + Integration Test) | **S** | Coordination + diff; gated by Phase 0 0a/0b/0d/0e/0f + step 4a |
 | Phase 5 — Per-service rollout | **M** | Each service is S; 7 services, parallelizable across operators |
 
 T-shirt sizes describe **effort scale**, not wall-clock time. Real elapsed time depends on operator count, review cycles, and how many gate answers from Phase 0 trigger Phase 2 revisions. See the implementation plan for per-sub-issue sizing.

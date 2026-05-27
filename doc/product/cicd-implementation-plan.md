@@ -48,24 +48,24 @@ The Phase 4 upstream PR is cut into **two sequenced PRs** along the credential b
 
 | Lane | Cut criterion | Phase 0 gate that blocks | Slots that ship here |
 |---|---|---|---|
-| **Upstream PR #1 — Build to GHCR** | Runs under `GITHUB_TOKEN`. Produces container images. Does not touch Azure or the cluster. | **0c** only (Azure org policy on public GHCR) | `W1`, `W2`, `W5a`, `W7`, `W10` (first pass — docker-build check), `W11`, `POC`, `ONBOARD-INIT-A`, `SETTINGS-APPLY`, `ADR-033`, `ADR-035`, `SPECS-A` |
-| **Upstream PR #2 — Deploy + Integration Test** | Acquires Azure federated identity. Writes to the cluster. Trust-boundary `if:` clause lands here. | 0a, 0b, 0d, 0e, 0f, plus step 4a (OIDC validation) | `W3`, `W4`, `W5b`, `W8`, `W10` (second pass — deploy/integration-test checks), `W13`, `W14`, `ONBOARD` (cross-repo), `ONBOARD-INIT-B`, `ADR-032`, `ADR-034`, `ADR-036`, `SPECS-B` |
+| **Build PR** | Runs under `GITHUB_TOKEN`. Produces container images. Does not touch Azure or the cluster. | **0c** only (Azure org policy on public GHCR) | `W1`, `W2`, `W5a`, `W7`, `W10` (first pass — docker-build check), `W11`, `POC`, `ONBOARD-INIT-A`, `SETTINGS-APPLY`, `ADR-033`, `ADR-035`, `SPECS-A` |
+| **Deploy PR** | Acquires Azure federated identity. Writes to the cluster. Trust-boundary `if:` clause lands here. | 0a, 0b, 0d, 0e, 0f, plus step 4a (OIDC validation) | `W3`, `W4`, `W5b`, `W8`, `W10` (second pass — deploy/integration-test checks), `W13`, `W14`, `ONBOARD` (cross-repo), `ONBOARD-INIT-B`, `ADR-032`, `ADR-034`, `ADR-036`, `SPECS-B` |
 
 Three slots span the cut and are split into A/B sub-issues, each shipping in its respective PR:
 
 | Original slot | Splits into | Notes |
 |---|---|---|
-| `W5` (wire validate.yml) | `W5a` (docker-build job, no `if:` gating) + `W5b` (deploy + integration-test jobs, §5.5 `if:` clause) | The trust-boundary `if:` lands with deploy because that's what it protects. W5a in PR #1 has docker-build runnable on every PR including external forks; the surface area is "wasted GHCR image" not "cluster credential leak" |
+| `W5` (wire validate.yml) | `W5a` (docker-build job, no `if:` gating) + `W5b` (deploy + integration-test jobs, §5.5 `if:` clause) | The trust-boundary `if:` lands with deploy because that's what it protects. W5a in the Build PR has docker-build runnable on every PR including external forks; the surface area is "wasted GHCR image" not "cluster credential leak" |
 | `ONBOARD-INIT` | `ONBOARD-INIT-A` (GHCR visibility + `SERVICE_NAME`/`MAVEN_PROFILE` vars + docker-build added to ruleset) + `ONBOARD-INIT-B` (`AZURE_*` presence check + `ACCEPTANCE_TEST_*` vars + deploy/integration-test added to ruleset) | The `init.yml` body absorbs new helper invocations in both PRs; ONBOARD-INIT-A's helpers stay running unmodified after ONBOARD-INIT-B layers in |
 | `SPECS` (workflow specs) | `SPECS-A` (`docker-build-workflow-spec.md`) + `SPECS-B` (`deploy-workflow-spec.md` + `integration-test-workflow-spec.md`) | Each spec lives with the PR that introduces the workflow it documents |
 
-`W10` (rulesets) is **not split into sub-issues** — it's a single JSON edit applied in two passes. The first pass adds `docker-build` to required checks (lands with PR #1). The second pass adds `deploy` and `integration-test` (lands with PR #2). The single `W10` sub-issue body documents both passes; the agent that lands W10 in sandbox produces a PR that adds all three; only the docker-build entry gets extracted into upstream PR #1 during the diff.
+`W10` (rulesets) is **not split into sub-issues** — it's a single JSON edit applied in two passes. The first pass adds `docker-build` to required checks (lands with Build PR). The second pass adds `deploy` and `integration-test` (lands with Deploy PR). The single `W10` sub-issue body documents both passes; the agent that lands W10 in sandbox produces a PR that adds all three; only the docker-build entry gets extracted into the Build PR during the diff.
 
 ### Build-lane vs deploy-lane firing order
 
 The lanes are **firing-order priorities**, not hard sequence locks. Agents can be fired on deploy-lane sub-issues in parallel with build-lane ones — the constraint is which upstream PR collects which sandbox PRs once they're green.
 
-- **Build lane fires first** because PR #1 is the priority upstream artifact and its only Phase 0 dependency is gate 0c (an email).
+- **Build lane fires first** because the Build PR is the priority upstream artifact and its only Phase 0 dependency is gate 0c (an email).
 - **Deploy lane fires as drafts in parallel** because most acceptance criteria explicitly say *"scaffolding with documented assumptions is fine"* — gate findings revise drafts in-PR rather than restarting agents.
 - **`W5b` waits for the deploy-lane composite actions** (`W3`, `W4`) plus `W13`. Drafting `W5b` earlier references non-existent paths and burns agent context.
 
@@ -80,7 +80,7 @@ graph TD
     classDef human fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d
     classDef adr fill:#dcfce7,stroke:#15803d,color:#14532d
 
-    subgraph BuildLane["Upstream PR #1 — Build to GHCR (priority lane)"]
+    subgraph BuildLane["Build PR (priority lane)"]
         W1["W1<br/>java-build profile"]:::build
         W2["W2<br/>docker-build"]:::build
         W5A["W5a<br/>wire docker-build job"]:::build
@@ -94,7 +94,7 @@ graph TD
         SPECS_A["SPECS-A<br/>docker-build spec"]:::adr
     end
 
-    subgraph DeployLane["Upstream PR #2 — Deploy + Integration Test"]
+    subgraph DeployLane["Deploy PR"]
         W3["W3<br/>aks-deploy"]:::deploy
         W4["W4<br/>integration-test"]:::deploy
         W8["W8<br/>cluster-health-check"]:::deploy
@@ -139,9 +139,9 @@ graph TD
 
 ## Wave strategy
 
-The wave order is **build-lane first** because PR #1 is the priority upstream artifact and only depends on Phase 0 gate 0c (an email). Deploy-lane agents fire in parallel as drafts; reviewer attention prioritizes the build lane until PR #1 merges. Each wave is fully parallel internally.
+The wave order is **build-lane first** because the Build PR is the priority upstream artifact and only depends on Phase 0 gate 0c (an email). Deploy-lane agents fire in parallel as drafts; reviewer attention prioritizes the build lane until the Build PR merges. Each wave is fully parallel internally.
 
-### Build lane (feeds Upstream PR #1)
+### Build lane (feeds Build PR)
 
 | Wave | Slots | Why this order |
 |------|-------|----------------|
@@ -150,7 +150,7 @@ The wave order is **build-lane first** because PR #1 is the priority upstream ar
 | **3 — onboarding + settings reconciliation** | `ONBOARD-INIT-A`, `SETTINGS-APPLY` | `ONBOARD-INIT-A` is the **fresh-fork** path (consumed by `init.yml` on template create): GHCR visibility + `SERVICE_NAME`/`MAVEN_PROFILE` vars. `SETTINGS-APPLY` is the **existing-fork** path: idempotent `setup-rulesets.sh` + `settings-apply.yml` workflow that reconciles rulesets, GHCR visibility, and surfaces missing per-service variables via an issue. Existing service forks need `SETTINGS-APPLY` because `init.yml` deletes its own helpers and can't be re-dispatched. Retention is **W11's job alone**, not ONBOARD-INIT-A's |
 | **4 — wire it together** | `W5a`, `W10` (first pass) | `W5a` blocked by `W1` + `W2`. `W10`'s first pass adds the `docker-build` required check; second pass lands with deploy-lane wave 4 |
 
-### Deploy lane (feeds Upstream PR #2 — fires in parallel as drafts)
+### Deploy lane (feeds Deploy PR — fires in parallel as drafts)
 
 | Wave | Slots | Why this order |
 |------|-------|----------------|
@@ -167,30 +167,30 @@ Sub-issues currently filed on this fork (`danielscholl-osdu/osdu-spi`). The "PR"
 
 | Slot | Issue | PR | Effort | Title |
 |------|-------|----|--------|-------|
-| `W1` | [#2](https://github.com/danielscholl-osdu/osdu-spi/issues/2) | #1 | XS | W1: Add maven_profile input to java-build action |
-| `W2` | [#3](https://github.com/danielscholl-osdu/osdu-spi/issues/3) | #1 | M | W2: New docker-build composite action |
-| `W3` | [#4](https://github.com/danielscholl-osdu/osdu-spi/issues/4) | #2 | M | W3: New aks-deploy composite action |
-| `W4` | [#5](https://github.com/danielscholl-osdu/osdu-spi/issues/5) | #2 | M | W4: New integration-test composite action |
-| `W5a` | [#22](https://github.com/danielscholl-osdu/osdu-spi/issues/22) | #1 | XS | W5a: Wire docker-build job into validate.yml |
-| `W5b` | [#6](https://github.com/danielscholl-osdu/osdu-spi/issues/6) (relabeled) | #2 | S | W5b: Wire deploy + integration-test jobs into validate.yml |
-| `W7` | [#7](https://github.com/danielscholl-osdu/osdu-spi/issues/7) | #1 | XS | W7: Add release-version image tag to release.yml |
-| `W10` | [#8](https://github.com/danielscholl-osdu/osdu-spi/issues/8) | #1 + #2 | XS | W10: Update branch-protection ruleset (two-pass) |
-| `W11` | [#9](https://github.com/danielscholl-osdu/osdu-spi/issues/9) | #1 | S | W11: GHCR retention scheduled workflow |
-| `W8` | [#10](https://github.com/danielscholl-osdu/osdu-spi/issues/10) | #2 | S | W8: New cluster-health-check composite action |
-| `POC` | [#11](https://github.com/danielscholl-osdu/osdu-spi/issues/11) | #1 | XS | POC notes skeleton + OIDC smoke-test workflow |
-| `ONBOARD` | [#12](https://github.com/danielscholl-osdu/osdu-spi/issues/12) | #2 | M | Phase 3 (cluster-side): Add `spi onboard` subcommand |
-| `ONBOARD-INIT-A` | [#21](https://github.com/danielscholl-osdu/osdu-spi/issues/21) (relabeled) | #1 | S | Phase 3 (fork-side, build half): GHCR + `MAVEN_PROFILE` vars |
-| `ONBOARD-INIT-B` | [#24](https://github.com/danielscholl-osdu/osdu-spi/issues/24) | #2 | S | Phase 3 (fork-side, deploy half): `AZURE_*` check + `ACCEPTANCE_TEST_*` vars |
-| `SETTINGS-APPLY` | [#25](https://github.com/danielscholl-osdu/osdu-spi/issues/25) | #1 | M | Settings reconciliation workflow + idempotent `setup-rulesets.sh` (covers existing forks) |
-| `ADR-032` | [#13](https://github.com/danielscholl-osdu/osdu-spi/issues/13) | #2 | XS | ADR-032: Author 'CI/CD Deploy Loop via Suspended Flux' |
-| `ADR-033` | [#14](https://github.com/danielscholl-osdu/osdu-spi/issues/14) | #1 | XS | ADR-033: Author 'GHCR as Service Image Registry' |
-| `ADR-034` | [#15](https://github.com/danielscholl-osdu/osdu-spi/issues/15) | #2 | XS | ADR-034: Author 'Federated Identity for Actions to Azure' |
-| `ADR-035` | [#16](https://github.com/danielscholl-osdu/osdu-spi/issues/16) | #1 | XS | ADR-035: Author 'Azure-Only Maven Profile Restriction' |
-| `ADR-036` | [#17](https://github.com/danielscholl-osdu/osdu-spi/issues/17) | #2 | XS | ADR-036: Author 'Workflow Trust Boundaries for CI/CD' |
-| `SPECS-A` | [#18](https://github.com/danielscholl-osdu/osdu-spi/issues/18) (relabeled) | #1 | XS | Create docker-build-workflow-spec.md |
-| `SPECS-B` | [#23](https://github.com/danielscholl-osdu/osdu-spi/issues/23) | #2 | XS | Create deploy + integration-test workflow specs |
-| `W13` | [#19](https://github.com/danielscholl-osdu/osdu-spi/issues/19) | #2 | XS | W13: Add workflow_dispatch force-full-pipeline path to validate.yml |
-| `W14` | [#20](https://github.com/danielscholl-osdu/osdu-spi/issues/20) | #2 | S | W14: New restore-deployment workflow |
+| `W1` | [#2](https://github.com/danielscholl-osdu/osdu-spi/issues/2) | Build | XS | W1: Add maven_profile input to java-build action |
+| `W2` | [#3](https://github.com/danielscholl-osdu/osdu-spi/issues/3) | Build | M | W2: New docker-build composite action |
+| `W3` | [#4](https://github.com/danielscholl-osdu/osdu-spi/issues/4) | Deploy | M | W3: New aks-deploy composite action |
+| `W4` | [#5](https://github.com/danielscholl-osdu/osdu-spi/issues/5) | Deploy | M | W4: New integration-test composite action |
+| `W5a` | [#22](https://github.com/danielscholl-osdu/osdu-spi/issues/22) | Build | XS | W5a: Wire docker-build job into validate.yml |
+| `W5b` | [#6](https://github.com/danielscholl-osdu/osdu-spi/issues/6) (relabeled) | Deploy | S | W5b: Wire deploy + integration-test jobs into validate.yml |
+| `W7` | [#7](https://github.com/danielscholl-osdu/osdu-spi/issues/7) | Build | XS | W7: Add release-version image tag to release.yml |
+| `W10` | [#8](https://github.com/danielscholl-osdu/osdu-spi/issues/8) | Build + Deploy | XS | W10: Update branch-protection ruleset (two-pass) |
+| `W11` | [#9](https://github.com/danielscholl-osdu/osdu-spi/issues/9) | Build | S | W11: GHCR retention scheduled workflow |
+| `W8` | [#10](https://github.com/danielscholl-osdu/osdu-spi/issues/10) | Deploy | S | W8: New cluster-health-check composite action |
+| `POC` | [#11](https://github.com/danielscholl-osdu/osdu-spi/issues/11) | Build | XS | POC notes skeleton + OIDC smoke-test workflow |
+| `ONBOARD` | [#12](https://github.com/danielscholl-osdu/osdu-spi/issues/12) | Deploy | M | Phase 3 (cluster-side): Add `spi onboard` subcommand |
+| `ONBOARD-INIT-A` | [#21](https://github.com/danielscholl-osdu/osdu-spi/issues/21) (relabeled) | Build | S | Phase 3 (fork-side, build half): GHCR + `MAVEN_PROFILE` vars |
+| `ONBOARD-INIT-B` | [#24](https://github.com/danielscholl-osdu/osdu-spi/issues/24) | Deploy | S | Phase 3 (fork-side, deploy half): `AZURE_*` check + `ACCEPTANCE_TEST_*` vars |
+| `SETTINGS-APPLY` | [#25](https://github.com/danielscholl-osdu/osdu-spi/issues/25) | Build | M | Settings reconciliation workflow + idempotent `setup-rulesets.sh` (covers existing forks) |
+| `ADR-032` | [#13](https://github.com/danielscholl-osdu/osdu-spi/issues/13) | Deploy | XS | ADR-032: Author 'CI/CD Deploy Loop via Suspended Flux' |
+| `ADR-033` | [#14](https://github.com/danielscholl-osdu/osdu-spi/issues/14) | Build | XS | ADR-033: Author 'GHCR as Service Image Registry' |
+| `ADR-034` | [#15](https://github.com/danielscholl-osdu/osdu-spi/issues/15) | Deploy | XS | ADR-034: Author 'Federated Identity for Actions to Azure' |
+| `ADR-035` | [#16](https://github.com/danielscholl-osdu/osdu-spi/issues/16) | Build | XS | ADR-035: Author 'Azure-Only Maven Profile Restriction' |
+| `ADR-036` | [#17](https://github.com/danielscholl-osdu/osdu-spi/issues/17) | Deploy | XS | ADR-036: Author 'Workflow Trust Boundaries for CI/CD' |
+| `SPECS-A` | [#18](https://github.com/danielscholl-osdu/osdu-spi/issues/18) (relabeled) | Build | XS | Create docker-build-workflow-spec.md |
+| `SPECS-B` | [#23](https://github.com/danielscholl-osdu/osdu-spi/issues/23) | Deploy | XS | Create deploy + integration-test workflow specs |
+| `W13` | [#19](https://github.com/danielscholl-osdu/osdu-spi/issues/19) | Deploy | XS | W13: Add workflow_dispatch force-full-pipeline path to validate.yml |
+| `W14` | [#20](https://github.com/danielscholl-osdu/osdu-spi/issues/20) | Deploy | S | W14: New restore-deployment workflow |
 
 **Split notes:** Three existing issues (`#6`, `#18`, `#21`) were relabeled and narrowed to their "A" half; three new sub-issues (`W5a`, `ONBOARD-INIT-B`, `SPECS-B`) cover the "B" half. The choice of which existing issue becomes the A vs B half was made by minimizing acceptance-criteria churn: `#6` already had the deploy + integration-test detail so it stays as `W5b`; `#18` and `#21` had build-half work that stays in their A relabeling.
 
@@ -204,7 +204,7 @@ Each subsection below is a copy-pasteable issue body. The H3 header is the issue
 
 ### W1: Add maven_profile input to java-build action
 
-**Slot:** `W1` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
+**Slot:** `W1` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
 Today `.github/actions/java-build/action.yml` runs `mvn clean install` with no `-P` flag, building all cloud provider modules. The new CI/CD design (D5, ADR-035) restricts service builds to the Azure profile (e.g. `partition-azure`) to speed builds and narrow the unit-test signal. The profile name is a per-service repo variable.
@@ -229,7 +229,7 @@ Add an optional input `maven_profile` to the action. When set, the Maven command
 
 ### W2: New docker-build composite action
 
-**Slot:** `W2` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
+**Slot:** `W2` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
 The new pipeline needs a composite action that builds a service container image from the Maven JAR artifacts and pushes it to GHCR. Image references are immutable per SHA (`:sha-<short>`), with additional mutable tags for branches (`:<branch>-snapshot`) and release-please versions (`:<version>`). Also verifies the GHCR package is public (W12 — covered by this issue).
@@ -267,7 +267,7 @@ The action:
 
 ### W3: New aks-deploy composite action
 
-**Slot:** `W3` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy)
+**Slot:** `W3` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Deploy PR
 
 **Context:**
 Composite action that authenticates to Azure via OIDC, asserts Flux is suspended, runs `kubectl set image`, waits for rollout, captures the deployed image digest for downstream verification. Per D13, deployment_name and container_name come from per-service repo variables (not derived from SERVICE_NAME).
@@ -298,7 +298,7 @@ Create `.github/actions/aks-deploy/action.yml` per Appendix A.3.
 
 ### W4: New integration-test composite action
 
-**Slot:** `W4` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy)
+**Slot:** `W4` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Deploy PR
 
 **Context:**
 Composite action that pulls acceptance test secrets from Key Vault, verifies the pod is still running the digest we just deployed (defending against mid-test Flux resume), probes cross-service health, then runs the service's acceptance-test Maven module against the gateway URL.
@@ -330,13 +330,13 @@ Create `.github/actions/integration-test/action.yml` per §5.3 contract and Appe
 
 ### W5a: Wire docker-build job into validate.yml (+ wire MAVEN_PROFILE into java-build)
 
-**Slot:** `W5a` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** `W1`, `W2` &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
+**Slot:** `W5a` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** `W1`, `W2` &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
-First half of the original `W5` slot, scoped to Upstream PR #1 (see [Upstream PR scope](#upstream-pr-scope)). Two changes to `validate.yml`:
+First half of the original `W5` slot, scoped to Build PR (see [Upstream PR scope](#upstream-pr-scope)). Two changes to `validate.yml`:
 
 1. **Wire `MAVEN_PROFILE`** into the existing `java-build` job invocation. `W1` added the `maven_profile` input to the action; without this wiring step, every fork's CI continues to build all provider profiles (D5 / ADR-035 was never realized). Pass `${{ vars.MAVEN_PROFILE }}` — if the variable is unset (forks not yet onboarded), behavior is unchanged from today (no `-P` flag, full-profile build).
-2. **Append the `docker-build` job** after `java-build`. Outputs `image_repository` and `image_digest`. No §5.5 trust-boundary `if:` clause here — that lands with `W5b` in PR #2. In PR #1's window, `docker-build` runs on every event type including `pull_request_target` and external-fork PRs; the surface area is "wasted GHCR image with PR commit SHA" not "cluster credential leak" (no cluster credential is in play yet). Per D12, no changes to `build.yml` — build.yml stays full-profile to preserve cross-provider breakage signal (see [Upstream PR scope](#upstream-pr-scope) for rationale).
+2. **Append the `docker-build` job** after `java-build`. Outputs `image_repository` and `image_digest`. No §5.5 trust-boundary `if:` clause here — that lands with `W5b` in Deploy PR. In the Build PR's window, `docker-build` runs on every event type including `pull_request_target` and external-fork PRs; the surface area is "wasted GHCR image with PR commit SHA" not "cluster credential leak" (no cluster credential is in play yet). Per D12, no changes to `build.yml` — build.yml stays full-profile to preserve cross-provider breakage signal (see [Upstream PR scope](#upstream-pr-scope) for rationale).
 
 **Task:**
 Edit `.github/template-workflows/validate.yml` to (a) pass `maven_profile: ${{ vars.MAVEN_PROFILE }}` to the existing java-build action invocation, and (b) add one new job (`docker-build`) after `java-build`.
@@ -349,13 +349,13 @@ Edit `.github/template-workflows/validate.yml` to (a) pass `maven_profile: ${{ v
 - [ ] One new job `docker-build` appended after `java-build`, gated on `needs.java-build.outputs.build_result == 'success'`
 - [ ] **Job `name:` field is exactly `🐳 Docker Build`** — character-for-character match with the required-check context in `W10`'s `default-branch.json`. Without exact alignment, branch protection leaves PRs permanently blocked on a check that never reports
 - [ ] Job calls `./.github/actions/docker-build` with the contract from `W2` and passes `jar_artifact_name` matching the artifact name `java-build` uploads. The docker-build action consumes the JAR artifact; **no second Maven invocation in validate.yml**
-- [ ] Outputs `image_repository` and `image_digest` exposed at the job level for downstream consumption (W5b consumes these in PR #2)
+- [ ] Outputs `image_repository` and `image_digest` exposed at the job level for downstream consumption (W5b consumes these in Deploy PR)
 - [ ] `permissions:` block on the docker-build job includes `packages: write`, `contents: read`
 - [ ] `code-validation` job unchanged; `java-build` job changed only by the new `maven_profile` input (no other behavior change)
 - [ ] **No changes to `build.yml`** — full-profile build preserved there for cross-provider signal
-- [ ] **No §5.5 trust-boundary `if:` clause** — that lands with W5b. Dependabot may also run docker-build; that's fine for PR #1's window
+- [ ] **No §5.5 trust-boundary `if:` clause** — that lands with W5b. Dependabot may also run docker-build; that's fine for the Build PR's window
 
-**Reference:** Design doc §5.4 + §9.5.A (Upstream PR #1 scope) + Appendix A.1. Check-name contract: `W10` (#8).
+**Reference:** Design doc §5.4 + §9.5.A (Build PR scope) + Appendix A.1. Check-name contract: `W10` (#8).
 
 **Out of scope:** `deploy` and `integration-test` jobs (`W5b`). The §5.5 trust-boundary `if:` clause (`W5b`). `workflow_dispatch force_full_pipeline` (#19 / W5b). Branch-protection changes (`W10`). Modifying `build.yml` (full-profile stays).
 
@@ -363,10 +363,10 @@ Edit `.github/template-workflows/validate.yml` to (a) pass `maven_profile: ${{ v
 
 ### W5b: Wire deploy + integration-test jobs into validate.yml
 
-**Slot:** `W5b` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W3`, `W4`, `W13`, `W5a` (merged) &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy)
+**Slot:** `W5b` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W3`, `W4`, `W13`, `W5a` (merged) &nbsp;|&nbsp; **Ships in:** Deploy PR
 
 **Context:**
-Second half of the original `W5` slot, scoped to Upstream PR #2. Appends the `deploy` and `integration-test` jobs to `validate.yml` and, **critically, lands the §5.5 trust-boundary `if:` clause** that gates the chain. The `if:` clause moves up to the `docker-build` job (added by W5a) so the entire downstream chain inherits gating via `needs:` — when `docker-build` is excluded by the trust clause, `deploy` and `integration-test` don't run either. This prevents an attacker from triggering image builds on `pull_request_target` whose images would then sit unused in GHCR.
+Second half of the original `W5` slot, scoped to Deploy PR. Appends the `deploy` and `integration-test` jobs to `validate.yml` and, **critically, lands the §5.5 trust-boundary `if:` clause** that gates the chain. The `if:` clause moves up to the `docker-build` job (added by W5a) so the entire downstream chain inherits gating via `needs:` — when `docker-build` is excluded by the trust clause, `deploy` and `integration-test` don't run either. This prevents an attacker from triggering image builds on `pull_request_target` whose images would then sit unused in GHCR.
 
 **Task:**
 Edit `.github/template-workflows/validate.yml` to:
@@ -409,7 +409,7 @@ Edit `.github/template-workflows/validate.yml` to:
 - [ ] **No changes to `build.yml`**
 - [ ] **Hard-blocked from merging until Phase 0 step 4a (OIDC validation) is green** for at least the four event subjects we care about (main push, feature push, PR sync, tag push). Plus all blocking deps (`W3`, `W4`, `W13`, `W5a`) merged
 
-**Reference:** Design doc §5.4–§5.5 + §9.5.B (Upstream PR #2 scope) + Appendix A.1.
+**Reference:** Design doc §5.4–§5.5 + §9.5.B (Deploy PR scope) + Appendix A.1.
 
 **Out of scope:** Modifying build.yml. Branch-protection changes (W10 second pass). The W13 `workflow_dispatch` plumbing itself (W5b references it; W13 implements the trigger).
 
@@ -417,7 +417,7 @@ Edit `.github/template-workflows/validate.yml` to:
 
 ### W7: Add release-version image tag to release.yml
 
-**Slot:** `W7` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** `W2` (soft — scaffold in parallel, integrate after) &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
+**Slot:** `W7` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** `W2` (soft — scaffold in parallel, integrate after) &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
 When release-please merges a release PR and creates a tag (e.g. `v1.2.3`), the existing image (built on merge to main) needs to be re-tagged with the version. Per design, release.yml does NOT re-deploy — deploy already happened on the merge to main.
@@ -450,7 +450,7 @@ Update `.github/template-workflows/release.yml` to add an image-retag job that t
 
 ### W8: New cluster-health-check composite action
 
-**Slot:** `W8` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy)
+**Slot:** `W8` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Deploy PR
 
 **Context:**
 Pre-flight check used by `deploy` and optionally by a scheduled health-badge workflow. Distinguishes "cluster is down" from "your code is broken" so PR authors aren't blamed for infra outages.
@@ -480,7 +480,7 @@ Create `.github/actions/cluster-health-check/action.yml` performing:
 
 ### W10: Update branch-protection ruleset for new required checks
 
-**Slot:** `W10` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (docker-build check) + PR #2 (deploy + integration-test checks) — two-pass JSON edit
+**Slot:** `W10` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR (docker-build check) + Deploy PR (deploy + integration-test checks) — two-pass JSON edit
 
 **Context:**
 Per G2, integration-test failure must block PRs to main. Required checks are defined in `.github/rulesets/default-branch.json`. **W10 owns the canonical data**; propagation to forks is `SETTINGS-APPLY`'s job (#25) — its idempotent `setup-rulesets.sh` + `settings-apply.yml` workflow PUT-updates the ruleset on each fork after the JSON changes via template-sync. Fresh forks pick up the new state via `init.yml`'s existing `setup-rulesets.sh` call (POSTs at init time).
@@ -496,8 +496,8 @@ Per G2, integration-test failure must block PRs to main. Required checks are def
 If any of these change (here or in `W5a`/`W5b`), all three must update in lockstep. Misalignment leaves PRs permanently blocked on a check that never reports.
 
 **Task (two passes):**
-- **Pass 1 (Upstream PR #1):** Add `🐳 Docker Build` to `default-branch.json` required checks.
-- **Pass 2 (Upstream PR #2):** Add `🚀 Deploy to spi-stack` + `🧪 Integration Tests` to `default-branch.json` required checks.
+- **Pass 1 (Build PR):** Add `🐳 Docker Build` to `default-branch.json` required checks.
+- **Pass 2 (Deploy PR):** Add `🚀 Deploy to spi-stack` + `🧪 Integration Tests` to `default-branch.json` required checks.
 
 **Files:**
 - `.github/rulesets/default-branch.json`
@@ -521,7 +521,7 @@ If any of these change (here or in `W5a`/`W5b`), all three must update in lockst
 
 ### W11: GHCR retention scheduled workflow
 
-**Slot:** `W11` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W2` (soft) &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
+**Slot:** `W11` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W2` (soft) &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
 Without retention, GHCR fills up with `:sha-*` tags forever. Per §8.5 policy:
@@ -551,7 +551,7 @@ Create `.github/template-workflows/ghcr-retention.yml` that runs weekly (cron) a
 
 ### Create POC notes skeleton (cicd-poc-notes.md) + OIDC smoke-test workflow
 
-**Slot:** `POC` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build) — POC notes are a sandbox artifact; the OIDC smoke-test workflow ships with PR #1 to make federated-credential validation reusable from the first deploy attempt onward
+**Slot:** `POC` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR — POC notes are a sandbox artifact; the OIDC smoke-test workflow ships with the Build PR to make federated-credential validation reusable from the first deploy attempt onward
 
 **Context:**
 Phase 0 produces a captured-knowledge document. Phase 2 work depends on values that Phase 0 surfaces (gateway URL, KV secret names, AKS auth mode, etc.). A skeleton lets Phase 0 fill in the blanks without inventing structure.
@@ -594,7 +594,7 @@ Phase 0 step 4a ALSO requires a minimal `workflow_dispatch` workflow that exerci
 
 ### Phase 3 (cluster-side): Add `spi onboard` subcommand — grant a repo permission to deploy
 
-**Slot:** `ONBOARD` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi-stack` &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy) — `spi onboard` only matters when there's a deploy step to grant cluster credentials for
+**Slot:** `ONBOARD` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi-stack` &nbsp;|&nbsp; **Ships in:** Deploy PR — `spi onboard` only matters when there's a deploy step to grant cluster credentials for
 
 **Context:**
 Per §9.4 of the design doc, Phase 3 splits along the credential boundary: this half owns cluster-side IAM grants (managed identity, federated credentials, AKS/KV RBAC, K8s RoleBinding) plus writing the three `AZURE_*` handoff secrets onto the target repo. Fork-side GHCR/ruleset/per-service-var setup lives in `osdu-spi`'s `init.yml` (see `ONBOARD-INIT`).
@@ -636,7 +636,7 @@ Implement `spi onboard --service <name> --repo <org/repo> --aks-cluster <cluster
 
 ### SETTINGS-APPLY: Settings reconciliation workflow + idempotent setup-rulesets.sh
 
-**Slot:** `SETTINGS-APPLY` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
+**Slot:** `SETTINGS-APPLY` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
 `init.yml` runs **once** on a fresh fork and `deploy-fork-resources.sh` deletes the init helpers (`init.yml`, `init-complete.yml`, `.github/local-actions/`) after merge — the entire `.github/local-actions/` path is in `sync-config.json`'s `cleanup_rules.directories`. Existing service forks (entitlements, legal, schema, storage, search, indexer, file) therefore have **no path** to re-run `ONBOARD-INIT-A` or `ONBOARD-INIT-B` — those are fresh-fork-only. `sync.yml` brings new files into forks via PR but only for paths explicitly declared in `sync-config.json` — and that file currently does NOT list `.github/rulesets/**`, `.github/template-workflows/settings-apply.yml`, or any settings-apply helpers, so without an explicit config change nothing in this slot actually reaches existing forks. Additionally, the existing `setup-rulesets.sh` is **POST-only**: it creates rulesets the first time but errors (HTTP 422) if a ruleset with the same name already exists, blocking idempotent updates.
@@ -668,18 +668,18 @@ Five coordinated changes:
    - `sync_rules.workflows.template_workflows[]` — new entry `{"path": ".github/template-workflows/settings-apply.yml", "description": "Per-fork settings reconciliation (idempotent ruleset PUT + variable presence + GHCR visibility)"}`
    - **Do NOT add these paths to `cleanup_rules`** — they must remain in forks indefinitely.
 
-5. **Required-variable manifest** consumed by `check-required-variables.sh`. The manifest lives inside the helper (a small bash array or a JSON file alongside) so future variable additions are one source-of-truth edits. The PR #1 set, the PR #2 set, and the cluster-handoff set are all required for a fully-operational fork:
+5. **Required-variable manifest** consumed by `check-required-variables.sh`. The manifest lives inside the helper (a small bash array or a JSON file alongside) so future variable additions are one source-of-truth edits. The Build PR's set, the Deploy PR's set, and the cluster-handoff set are all required for a fully-operational fork:
 
    | Variable | Owner | When required |
    |---|---|---|
    | `SERVICE_NAME` | Operator (set by `ONBOARD-INIT-A` on fresh forks; manual on existing) | Always |
    | `MAVEN_PROFILE` | Operator | Always (drives `W1` / `W5a` build path) |
-   | `ACCEPTANCE_TEST_DIR` | Operator | After PR #2 lands |
-   | `ACCEPTANCE_TEST_SECRET_MAP` | Operator | After PR #2 lands |
-   | `ACCEPTANCE_TEST_DEPENDENCIES` | Operator | After PR #2 lands |
-   | `K8S_DEPLOYMENT_NAME` | `spi onboard` (writes via `gh variable set`) | After PR #2 lands; consumed by `W5b`'s deploy job |
-   | `K8S_CONTAINER_NAME` | `spi onboard` | After PR #2 lands; consumed by `W5b`'s deploy job + W14 restore |
-   | `AZURE_CLIENT_ID` (secret) | `spi onboard` | After PR #2 lands; checked-present, never logged |
+   | `ACCEPTANCE_TEST_DIR` | Operator | After the Deploy PR lands |
+   | `ACCEPTANCE_TEST_SECRET_MAP` | Operator | After the Deploy PR lands |
+   | `ACCEPTANCE_TEST_DEPENDENCIES` | Operator | After the Deploy PR lands |
+   | `K8S_DEPLOYMENT_NAME` | `spi onboard` (writes via `gh variable set`) | After the Deploy PR lands; consumed by `W5b`'s deploy job |
+   | `K8S_CONTAINER_NAME` | `spi onboard` | After the Deploy PR lands; consumed by `W5b`'s deploy job + W14 restore |
+   | `AZURE_CLIENT_ID` (secret) | `spi onboard` | After the Deploy PR lands; checked-present, never logged |
 
 **Files:**
 - `.github/local-actions/init-helpers/setup-rulesets.sh` — **delete** (moved to new location)
@@ -716,10 +716,10 @@ Five coordinated changes:
 
 ### ONBOARD-INIT-A: Extend init.yml for build-side fresh-fork onboarding (GHCR visibility + per-service vars)
 
-**Slot:** `ONBOARD-INIT-A` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi` (this repo) &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
+**Slot:** `ONBOARD-INIT-A` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi` (this repo) &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
-First half of the original `ONBOARD-INIT` slot, scoped to Upstream PR #1 (see [Upstream PR scope](#upstream-pr-scope)). Per §9.4.B of the design doc, the fork side of onboarding owns the per-fork settings that need operator-supplied values. `init.yml` runs **once** on a fresh fork (template create) and `deploy-fork-resources.sh` then deletes the init helpers — so `ONBOARD-INIT-A` only runs on fresh forks. Existing service forks (entitlements, legal, etc.) take the `SETTINGS-APPLY` path (#25) for ongoing reconciliation; GHCR visibility for existing forks is reconciled by `SETTINGS-APPLY`'s `reconcile-ghcr-visibility.sh`.
+First half of the original `ONBOARD-INIT` slot, scoped to Build PR (see [Upstream PR scope](#upstream-pr-scope)). Per §9.4.B of the design doc, the fork side of onboarding owns the per-fork settings that need operator-supplied values. `init.yml` runs **once** on a fresh fork (template create) and `deploy-fork-resources.sh` then deletes the init helpers — so `ONBOARD-INIT-A` only runs on fresh forks. Existing service forks (entitlements, legal, etc.) take the `SETTINGS-APPLY` path (#25) for ongoing reconciliation; GHCR visibility for existing forks is reconciled by `SETTINGS-APPLY`'s `reconcile-ghcr-visibility.sh`.
 
 **Narrowed scope vs. original:** Earlier this slot also owned (a) ruleset extension for the new required checks and (b) GHCR retention setup. Both moved out:
 - **Rulesets** are owned by `W10` (canonical JSON data) + `SETTINGS-APPLY` (propagation via idempotent `setup-rulesets.sh` + `settings-apply.yml`). At init time the existing call to `setup-rulesets.sh` from `init-complete.yml` POSTs the up-to-date JSON; no separate "branch protection extension" helper is needed
@@ -743,7 +743,7 @@ Extend `init.yml` / `init-complete.yml` and add helpers under `.github/local-act
 - [ ] `init.yml`'s existing happy path (template-fresh fork) still succeeds end-to-end with the build-side behaviours layered in
 - [ ] Helper files are structured so ONBOARD-INIT-B can extend them additively (e.g., `setup-service-variables.sh` takes a list of variable names; ONBOARD-INIT-B passes additional names without rewriting the helper)
 
-**Reference:** Design doc §7.3 (variable ownership table) + §7.4 (GHCR endpoint discrimination) + §9.4.B (full deliverable spec) + §9.5.A (PR #1 scope). Existing `init-complete.yml` lines 271-348 for the init-time flow.
+**Reference:** Design doc §7.3 (variable ownership table) + §7.4 (GHCR endpoint discrimination) + §9.4.B (full deliverable spec) + §9.5.A (Build PR scope). Existing `init-complete.yml` lines 271-348 for the init-time flow.
 
 **Out of scope:**
 - **Ruleset extension** — `W10` (#8) owns the JSON data; `SETTINGS-APPLY` (#25) owns the apply mechanism
@@ -758,10 +758,10 @@ Extend `init.yml` / `init-complete.yml` and add helpers under `.github/local-act
 
 ### ONBOARD-INIT-B: Extend init.yml for deploy-side fresh-fork onboarding (AZURE_* check + ACCEPTANCE_TEST_* vars)
 
-**Slot:** `ONBOARD-INIT-B` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `ONBOARD-INIT-A` (merged) &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi` (this repo) &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy)
+**Slot:** `ONBOARD-INIT-B` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `ONBOARD-INIT-A` (merged) &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi` (this repo) &nbsp;|&nbsp; **Ships in:** Deploy PR
 
 **Context:**
-Second half of the original `ONBOARD-INIT` slot, scoped to Upstream PR #2. Layers the **deploy-side** onboarding helpers on top of what ONBOARD-INIT-A landed in PR #1: the `AZURE_*` secret presence check (soft handshake with `spi onboard`) and the deploy-side per-service variables (`ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`). Like ONBOARD-INIT-A, this is **fresh-fork-only**; existing forks reconcile via `SETTINGS-APPLY` (#25).
+Second half of the original `ONBOARD-INIT` slot, scoped to Deploy PR. Layers the **deploy-side** onboarding helpers on top of what ONBOARD-INIT-A landed in Build PR: the `AZURE_*` secret presence check (soft handshake with `spi onboard`) and the deploy-side per-service variables (`ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`). Like ONBOARD-INIT-A, this is **fresh-fork-only**; existing forks reconcile via `SETTINGS-APPLY` (#25).
 
 This pairs with `ONBOARD` (cluster-side) in `osdu-spi-stack`. The two halves handshake via three secrets (`AZURE_*`) and two repo variables (`K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`) that `ONBOARD` writes; the soft handshake check posts a comment if `AZURE_*` is missing.
 
@@ -784,7 +784,7 @@ Extend `init.yml` / `init-complete.yml` and add/extend helpers under `.github/lo
 - [ ] No secret values logged at any step
 - [ ] `init.yml`'s existing happy path (template-fresh fork) plus the build-side flow from ONBOARD-INIT-A still succeed end-to-end with the deploy-side behaviours layered in
 
-**Reference:** Design doc §7.3 + §9.4.B + §9.5.B (PR #2 scope). Existing-fork path: `SETTINGS-APPLY` (#25).
+**Reference:** Design doc §7.3 + §9.4.B + §9.5.B (Deploy PR scope). Existing-fork path: `SETTINGS-APPLY` (#25).
 
 **Out of scope:**
 - **Ruleset extension** — `W10` (#8, second pass) owns the JSON data; `SETTINGS-APPLY` (#25) owns the apply mechanism
@@ -798,7 +798,7 @@ Extend `init.yml` / `init-complete.yml` and add/extend helpers under `.github/lo
 
 ### ADR-032: Author 'CI/CD Deploy Loop via Suspended Flux'
 
-**Slot:** `ADR-032` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy)
+**Slot:** `ADR-032` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Deploy PR
 
 **Context:**
 The design pins Flux as permanently suspended on the shared CI cluster so per-PR workflows can `kubectl set image` freely. This is a foundational deployment-model decision and deserves an ADR.
@@ -823,7 +823,7 @@ Author `doc/src/adr/032-cicd-deploy-loop-via-suspended-flux.md` per the existing
 
 ### ADR-033: Author 'GHCR as Service Image Registry'
 
-**Slot:** `ADR-033` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
+**Slot:** `ADR-033` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
 Decision to use GHCR with public visibility for service images, vs. ACR or private GHCR alternatives.
@@ -848,7 +848,7 @@ Author `doc/src/adr/033-ghcr-as-service-image-registry.md`. Content per Appendix
 
 ### ADR-034: Author 'Federated Identity for Actions to Azure'
 
-**Slot:** `ADR-034` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy)
+**Slot:** `ADR-034` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Deploy PR
 
 **Context:**
 Per-fork managed identity with federated credentials, replacing static `AZURE_CREDENTIALS` JSON secrets. Provides per-service blast-radius isolation.
@@ -874,7 +874,7 @@ Author `doc/src/adr/034-federated-identity-actions-to-azure.md`. Content per App
 
 ### ADR-035: Author 'Azure-Only Maven Profile Restriction'
 
-**Slot:** `ADR-035` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
+**Slot:** `ADR-035` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
 Build only `-P <service>-azure` profile in CI, skipping AWS/IBM/GC profiles.
@@ -900,7 +900,7 @@ Author `doc/src/adr/035-azure-only-maven-profile.md`. Content per Appendix B ADR
 
 ### ADR-036: Author 'Workflow Trust Boundaries for CI/CD'
 
-**Slot:** `ADR-036` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy) — trust boundary becomes load-bearing only with a cluster credential in play
+**Slot:** `ADR-036` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Deploy PR — trust boundary becomes load-bearing only with a cluster credential in play
 
 **Context:**
 The new federated-identity-bearing jobs must not run on attacker-controlled code (`pull_request_target`, external-fork PRs, `dependabot[bot]`). This trust model is a load-bearing security decision and deserves an ADR.
@@ -927,16 +927,16 @@ Author `doc/src/adr/036-workflow-trust-boundaries.md`. Content per Appendix B AD
 
 ### SPECS-A: Create docker-build workflow spec
 
-**Slot:** `SPECS-A` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #1 (Build)
+**Slot:** `SPECS-A` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
-First half of the original `SPECS` slot, scoped to Upstream PR #1. The `doc/product/` directory has spec docs for each workflow (build, release, validate, cascade, etc.). The new docker-build stage that PR #1 introduces needs a matching spec.
+First half of the original `SPECS` slot, scoped to Build PR. The `doc/product/` directory has spec docs for each workflow (build, release, validate, cascade, etc.). The new docker-build stage that the Build PR introduces needs a matching spec.
 
 **Task:**
 Create one new spec doc in `doc/product/` mirroring the structure of existing `build-workflow-spec.md`:
 - `docker-build-workflow-spec.md`
 
-The spec documents: purpose, triggers, inputs, outputs, failure modes, dependencies on other workflows/actions, and a forward reference to ADR-036 noting that the trust-boundary `if:` clause is added in PR #2 (W5b). In PR #1's window, `docker-build` is documented as running on every event type.
+The spec documents: purpose, triggers, inputs, outputs, failure modes, dependencies on other workflows/actions, and a forward reference to ADR-036 noting that the trust-boundary `if:` clause is added in the Deploy PR (W5b). In the Build PR's window, `docker-build` is documented as running on every event type.
 
 **Files:**
 - `doc/product/docker-build-workflow-spec.md` (new)
@@ -944,10 +944,10 @@ The spec documents: purpose, triggers, inputs, outputs, failure modes, dependenc
 **Acceptance criteria:**
 - [ ] Same structure and heading conventions as existing spec docs (read `build-workflow-spec.md` for the template)
 - [ ] References the parent design doc for deeper detail
-- [ ] Includes a "Trust boundary (deferred to PR #2)" subsection noting that §5.5 gating lands with W5b; explicitly says docker-build is unrestricted in the PR #1 window because no cluster credential is in play
+- [ ] Includes a "Trust boundary (deferred to Deploy PR)" subsection noting that §5.5 gating lands with W5b; explicitly says docker-build is unrestricted in the Build PR window because no cluster credential is in play
 - [ ] `architecture.md` and `workflow-strategy.md` are NOT modified
 
-**Reference:** Design doc §5.1 + §9.5.A (PR #1 scope) + existing `doc/product/*-workflow-spec.md` files.
+**Reference:** Design doc §5.1 + §9.5.A (Build PR scope) + existing `doc/product/*-workflow-spec.md` files.
 
 **Out of scope:** Deploy + integration-test specs (SPECS-B). Updates to `architecture.md` or `workflow-strategy.md`.
 
@@ -955,10 +955,10 @@ The spec documents: purpose, triggers, inputs, outputs, failure modes, dependenc
 
 ### SPECS-B: Create deploy + integration-test workflow specs
 
-**Slot:** `SPECS-B` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy)
+**Slot:** `SPECS-B` &nbsp;|&nbsp; **Label:** `documentation` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Deploy PR
 
 **Context:**
-Second half of the original `SPECS` slot, scoped to Upstream PR #2. The deploy and integration-test stages that PR #2 introduces each need a matching spec.
+Second half of the original `SPECS` slot, scoped to Deploy PR. The deploy and integration-test stages that the Deploy PR introduces each need a matching spec.
 
 **Task:**
 Create two new spec docs in `doc/product/` mirroring the structure of existing `build-workflow-spec.md`:
@@ -978,15 +978,15 @@ Each spec documents: purpose, triggers, inputs, outputs, failure modes, dependen
 - [ ] The deploy spec cross-links to ADR-032 (suspended-Flux) and ADR-034 (federated identity)
 - [ ] `architecture.md` and `workflow-strategy.md` are NOT modified
 
-**Reference:** Design doc §5.2 + §5.3 + §9.5.B (PR #2 scope) + existing `doc/product/*-workflow-spec.md` files.
+**Reference:** Design doc §5.2 + §5.3 + §9.5.B (Deploy PR scope) + existing `doc/product/*-workflow-spec.md` files.
 
-**Out of scope:** docker-build spec (SPECS-A — ships in PR #1). Updates to `architecture.md` or `workflow-strategy.md`.
+**Out of scope:** docker-build spec (SPECS-A — ships in Build PR). Updates to `architecture.md` or `workflow-strategy.md`.
 
 ---
 
 ### W13: Add workflow_dispatch force-full-pipeline path to validate.yml
 
-**Slot:** `W13` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy) — `force_full_pipeline` exists to bridge paths-ignored template-sync PRs into the full deploy/test pipeline; without deploy/test it's a no-op
+**Slot:** `W13` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Deploy PR — `force_full_pipeline` exists to bridge paths-ignored template-sync PRs into the full deploy/test pipeline; without deploy/test it's a no-op
 
 **Context:**
 Today `template-workflows/validate.yml` has `paths-ignore` rules that exclude `.github/actions/**` and `.github/template-workflows/**`. That means during Phase 2 iteration, when a template-sync PR brings sandbox workflow/action changes into the partition fork, the validation workflow does NOT run automatically — there's no signal that the new deploy pipeline still works.
@@ -1012,7 +1012,7 @@ Add a `workflow_dispatch` "force-full-pipeline" input to `.github/template-workf
 
 ### W14: New restore-deployment workflow
 
-**Slot:** `W14` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W3` (consumes `aks-deploy` action) &nbsp;|&nbsp; **Ships in:** Upstream PR #2 (Deploy)
+**Slot:** `W14` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W3` (consumes `aks-deploy` action) &nbsp;|&nbsp; **Ships in:** Deploy PR
 
 **Context:**
 §8.9 of the design doc documents a manual `restore-deployment` workflow_dispatch that operators invoke when a bad deploy is contaminating cross-service tests:
