@@ -1054,7 +1054,7 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 
 4. **Manually provision managed identity** for `danielscholl-osdu/partition` per §6.1 steps 1-5. Use the RoleBinding form determined by step 0b.
 
-4a. **Validate the OIDC path end-to-end.** Use the checked-in `.github/template-workflows/oidc-smoke-test.yml` workflow (delivered by the `POC` sub-issue) that exercises only `azure/login@v2` + `az aks get-credentials` + `kubectl get deployments -n osdu`:
+4a. **Validate the OIDC path end-to-end (branch and tag subjects only).** Use the checked-in `.github/template-workflows/oidc-smoke-test.yml` workflow (delivered by the `POC` sub-issue) that exercises only `azure/login@v2` + `az aks get-credentials` + `kubectl get deployments -n osdu`:
    ```yaml
    - uses: azure/login@v2
      with:
@@ -1064,9 +1064,11 @@ The work is sequenced in five phases, with explicit exit criteria for each.
    - run: az aks get-credentials -g $RG -n $CLUSTER
    - run: kubectl get deployments -n osdu
    ```
-   Run from each federated-credential subject we'll need at production: dispatch on `main`, on a feature branch via push, via PR open, and (when release flow lands) on a tag push. Each one that fails surfaces a missing or mismatched federated credential — fix before W2/W3 are written.
+   Run from each federated-credential subject that `workflow_dispatch` can exercise: dispatch on `main` (default branch ref), on a feature branch via push, and (when release flow lands) on a tag push. Each one that fails surfaces a missing or mismatched federated credential — fix before W2/W3 are written.
 
-   **The workflow is a checked-in artifact, not a throwaway.** Re-run it any time federated credentials are edited (subject claims added, rotated identities, etc.). It's the only repeatable proof the credential is correctly configured.
+   **Scope clarification — what this smoke test does NOT cover.** A `workflow_dispatch`-only workflow **cannot validate the `pull_request` subject claim** (`repo:org/repo:pull_request`). The dispatched workflow always presents one of the branch/tag claim shapes regardless of the `ref` input. The PR subject is exercised by the **real `validate.yml` deploy job on a real PR** once `W5b` lands in the Deploy PR. Don't close gate 4a having validated only branch+tag and assume PR-subject is also fine — open a throwaway PR with a no-op change in the partition sandbox to exercise the PR subject before declaring Phase 0 complete.
+
+   **The workflow is a checked-in artifact, not a throwaway.** Re-run it any time federated credentials are edited (subject claims added, rotated identities, etc.). It's the only repeatable proof the branch+tag subjects are correctly configured.
 
 5. **Cluster CI-mode:**
    ```
@@ -1258,20 +1260,22 @@ Each side is one command. The split tracks the credential boundary, not artifici
 
 The seven service forks (entitlements, legal, schema, storage, search, indexer, file) were initialized **before** this CI/CD work. `init.yml`'s helpers were deleted from them, so the `ONBOARD-INIT-A`/`-B` fresh-fork helpers cannot run there. Ruleset updates also don't reach them: `sync.yml` brings file changes into forks via PR, but it does **not** call any GitHub Settings/Rulesets API, and the existing `setup-rulesets.sh` is POST-only (errors HTTP 422 when a ruleset with the same name already exists).
 
-**`SETTINGS-APPLY`** closes both gaps:
+**`SETTINGS-APPLY`** closes all gaps:
 
-1. **Make `setup-rulesets.sh` idempotent** — probe via `GET /repos/{owner}/{repo}/rulesets`, `PUT` if exists, `POST` if not. Add a `--dry-run` mode.
-2. **Preserve `setup-rulesets.sh` post-init** — `deploy-fork-resources.sh` is modified to keep this one helper (and `.github/rulesets/*.json`) in the fork. All other init-only helpers continue to be deleted as today.
-3. **Add `.github/template-workflows/settings-apply.yml`** — a workflow that runs on `schedule` (weekly), `workflow_dispatch`, and `push` to `main` with `paths: ['.github/rulesets/**', '.github/local-actions/init-helpers/setup-rulesets.sh']`. Calls:
-   - The now-idempotent `setup-rulesets.sh` to reconcile `default-branch.json` + `integration-branch.json`
-   - `check-required-variables.sh` to verify each required per-service variable is set; if absent, opens (or updates) an open issue labelled `human-required` listing exactly what's missing
-   - `reconcile-ghcr-visibility.sh` to ensure public GHCR package visibility (mirrors `W2`'s post-push flip; same org/user endpoint discrimination)
-   - Step summary capturing what was reconciled, what changed, what's still missing
+1. **Relocate `setup-rulesets.sh` to a durable path + make it idempotent + add per-fork filtering.**
+   - Move `.github/local-actions/init-helpers/setup-rulesets.sh` → `.github/scripts/settings-apply/setup-rulesets.sh`. The old path was in `cleanup_rules.directories` and would be deleted post-init; the new path is durable in `.github/scripts/`, which is not cleaned up.
+   - Idempotency: probe via `GET /repos/{owner}/{repo}/rulesets`, `PUT` if exists, `POST` if not. Add a `--dry-run` mode.
+   - **Per-fork required-check filtering** — before submitting the ruleset payload, probe the fork for prerequisites and strip checks whose prerequisites are unmet. Today: if `AZURE_CLIENT_ID` is absent on the fork, strip `🚀 Deploy to spi-stack` and `🧪 Integration Tests` from `required_status_checks`; `🐳 Docker Build` is always retained. This is what makes W10's "canonical fully-onboarded JSON" + per-fork heterogeneity safe: forks that haven't completed cluster-side onboarding don't get blocked by checks that can't report. When `spi onboard` later writes `AZURE_CLIENT_ID`, the next `settings-apply` run restores the full canonical check set.
+2. **Add helpers + workflow at the durable path.**
+   - `.github/scripts/settings-apply/check-required-variables.sh` — verifies each required per-service variable/secret; opens or updates a `human-required` issue listing what's missing; closes it when all required values are present.
+   - `.github/scripts/settings-apply/reconcile-ghcr-visibility.sh` — same flip logic that `W2` uses post-push; extracted so both `W2`'s composite action and this workflow consume it.
+   - `.github/template-workflows/settings-apply.yml` — runs on `schedule` (weekly), `workflow_dispatch`, and `push` to `main` with `paths: ['.github/rulesets/**', '.github/scripts/settings-apply/**']`. Calls the three helpers above. Step summary captures: rulesets reconciled (created/updated/no-op), filter decisions, variables missing, GHCR visibility state.
+3. **Extend `.github/sync-config.json`** so the new artifacts actually propagate from template to forks via template-sync. Add `.github/rulesets/` (sync_all), `.github/scripts/settings-apply/` (sync_all), and `.github/template-workflows/settings-apply.yml`. Without this, the relocation and new workflow live only in the template and never reach existing forks.
 
 **Triggering on an existing fork after this work lands:**
 
 ```
-# Path A — template-sync brings the updated rulesets JSON / setup-rulesets.sh / settings-apply.yml.
+# Path A — template-sync brings the updated rulesets JSON / setup-rulesets.sh (new path) / settings-apply.yml.
 #     Operator merges the sync PR; the push triggers settings-apply.yml on the merge commit.
 
 # Path B — operator manually dispatches:
@@ -1283,14 +1287,17 @@ $ gh workflow run settings-apply.yml -R <org>/<service>
 For variables the operator must set out of band, `settings-apply.yml` opens an issue. The operator runs `gh variable set NAME=value` (or uses the Settings UI), then re-dispatches `settings-apply.yml`; the issue closes when all required variables are present.
 
 **Exit criteria:**
+- `setup-rulesets.sh` lives at `.github/scripts/settings-apply/`; `init-complete.yml` calls it from the new path; `deploy-fork-resources.sh` no longer needs a preservation exception for it.
+- `sync-config.json` includes the new directories and workflow; partition's next sync run picks them up.
 - Each existing service fork has `settings-apply.yml` running on schedule + dispatch + ruleset path changes.
 - A ruleset JSON update at `Azure/osdu-spi` propagates to existing forks via template-sync PR → merge → `settings-apply.yml` → PUT-update of the existing ruleset.
-- An existing fork without `MAVEN_PROFILE` (or any required variable) gets a `human-required: settings-apply` issue listing what's missing, instead of CI silently building wrong artifacts.
+- A fork without `AZURE_CLIENT_ID` gets a filtered ruleset (build-only required check) instead of being blocked by pending deploy/integration-test checks.
+- An existing fork without `MAVEN_PROFILE` (or any required variable) gets a `human-required` issue listing what's missing, instead of CI silently building wrong artifacts.
 
 **Out of `SETTINGS-APPLY` scope:**
 - Cross-fork orchestration (each fork reconciles itself)
 - Auto-setting required variable *values* (the workflow surfaces what's missing; operators populate values)
-- Modifying `sync.yml` (template-sync's role is unchanged — it brings files; `settings-apply.yml` applies them)
+- Modifying `sync.yml` itself (template-sync's role is unchanged — it brings files declared in `sync-config.json`; this slot adds the declarations and `settings-apply.yml` applies the file contents)
 - Cluster-side IAM (`ONBOARD` in `osdu-spi-stack`)
 
 ### 9.5 Phase 4 — PR Back to Official `Azure/osdu-spi`

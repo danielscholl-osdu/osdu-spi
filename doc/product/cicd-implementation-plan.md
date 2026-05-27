@@ -179,6 +179,7 @@ Sub-issues currently filed on this fork (`danielscholl-osdu/osdu-spi`). The "PR"
 | `W8` | [#10](https://github.com/danielscholl-osdu/osdu-spi/issues/10) | Deploy | S | W8: New cluster-health-check composite action |
 | `POC` | [#11](https://github.com/danielscholl-osdu/osdu-spi/issues/11) | Build | XS | POC notes skeleton + OIDC smoke-test workflow |
 | `ONBOARD` | [#12](https://github.com/danielscholl-osdu/osdu-spi/issues/12) | Deploy | M | Phase 3 (cluster-side): Add `spi onboard` subcommand |
+| `STACK-OPS` | [#26](https://github.com/danielscholl-osdu/osdu-spi/issues/26) | Deploy | M | Operational tools for permanent suspended-Flux mode (cluster-side, tracking stub) |
 | `ONBOARD-INIT-A` | [#21](https://github.com/danielscholl-osdu/osdu-spi/issues/21) (relabeled) | Build | S | Phase 3 (fork-side, build half): GHCR + `MAVEN_PROFILE` vars |
 | `ONBOARD-INIT-B` | [#24](https://github.com/danielscholl-osdu/osdu-spi/issues/24) | Deploy | S | Phase 3 (fork-side, deploy half): `AZURE_*` check + `ACCEPTANCE_TEST_*` vars |
 | `SETTINGS-APPLY` | [#25](https://github.com/danielscholl-osdu/osdu-spi/issues/25) | Build | M | Settings reconciliation workflow + idempotent `setup-rulesets.sh` (covers existing forks) |
@@ -239,29 +240,34 @@ Create `.github/actions/docker-build/action.yml` per the Appendix A.2 sketch in 
 
 The action:
 - Downloads the JAR artifact produced by the caller's preceding `java-build` job (does NOT re-run Maven)
-- Logs into GHCR via `GITHUB_TOKEN`
-- Computes tags: `:sha-<short>` always, `:<branch>-snapshot` on push, `:<version>` on tag push
-- Builds and pushes via `docker/build-push-action@v6` with GHA layer cache
-- After push, attempts to flip GHCR package visibility to public (idempotent — no-op if already public; soft-warns if the API call fails so the deploy isn't blocked on a single fork's missing admin permission). This eliminates the first-run failure where a fresh fork creates a private package
+- **Always builds the image** — gives untrusted PRs the "your Dockerfile compiles" feedback signal
+- **Conditionally pushes to GHCR** based on the caller-supplied `push` input — the trust gate lives in the calling workflow (W5a), not inside the action
+- Computes tags: `:sha-<short>` always (whether pushed or not), `:<branch>-snapshot` on push, `:<version>` on tag push
+- Uses `docker/build-push-action@v6` with GHA layer cache; the action's own `push:` input is wired from this composite action's `push:` input
+- After a successful push, attempts to flip GHCR package visibility to public (idempotent — no-op if already public; soft-warns if the API call fails so the deploy isn't blocked on a single fork's missing admin permission)
+
+**Why the push gate.** W5a fires docker-build on every event including `pull_request_target` and external-fork PRs (no §5.5 `if:` clause in the Build PR window — see W5a). The job carries `packages: write`. Without a push gate, untrusted PR code could produce **public** container images under the org/package namespace, which a downstream consumer (or the deploy step in the Deploy PR once it lands) might trust as if canonical. The fix is to keep the *build* unrestricted (so PR authors get build-validation feedback) but gate the *push* on the same trust-boundary clause that W5b puts on deploy/integration-test. Build-without-push is a low-risk operation: the runner is sandboxed, no Azure creds are in play, and the resulting image never leaves the runner.
 
 **Files:**
 - `.github/actions/docker-build/action.yml` (new)
 
 **Acceptance criteria:**
-- [ ] Action declares inputs per §5.1 contract (`dockerfile_path`, `build_context`, `image_name`, `registry`, `org`, `jar_artifact_name`, `build_args`)
+- [ ] Action declares inputs per §5.1 contract (`dockerfile_path`, `build_context`, `image_name`, `registry`, `org`, `jar_artifact_name`, `build_args`) **plus a new `push: { type: boolean, required: false, default: true }` input**
+- [ ] When `push: false`: action builds the image, computes the `:sha-<short>` tag for logging, but does NOT push to GHCR, does NOT compute branch-snapshot / version tags, does NOT run the visibility flip, and emits an **empty `image_digest` output** with `image_repository` still populated. Step summary clearly notes "build-only run (push gated off by caller)" so PR reviewers understand why no GHCR artifact exists
+- [ ] When `push: true` (the default): action behaves as previously specified — pushes, tags, flips visibility, emits `image_digest`
 - [ ] **Downloads the JAR artifact from a previous job** via `actions/download-artifact@<sha>` keyed off `inputs.jar_artifact_name`; uses the layout `java-build` uploaded (`provider/<service>-azure/target/*-spring-boot.jar`). **Does NOT invoke `mvn` inside the action** — Maven runs once in `java-build`; docker-build consumes its output
-- [ ] Outputs `image_repository` (e.g. `ghcr.io/<org>/<service>`) and `image_digest` (e.g. `sha256:abc123…`). **The digest value already includes the `sha256:` prefix** — that's what `docker/build-push-action@v6` emits; do NOT prepend it again or `kubectl set image @sha256:sha256:…` will produce an unpullable reference
-- [ ] Tag computation matches §5.1 + Appendix A.2 (immutable `:sha-*`, branch-snapshot on push, semver on tag push)
-- [ ] GHA cache wired (`cache-from: type=gha, cache-to: type=gha,mode=max`)
-- [ ] **Visibility flip (after successful push):** attempts to set the GHCR package visibility to public via `gh api -X PATCH`. Uses the org-package endpoint (`/orgs/{owner}/packages/container/{name}/visibility`) when `${{ github.repository_owner }}` is an Organization, the user-package endpoint (`/users/{owner}/packages/container/{name}/visibility`) otherwise. Discriminate via `gh api /users/{owner} --jq '.type'`. See §7.4
+- [ ] Outputs `image_repository` (e.g. `ghcr.io/<org>/<service>`; always set) and `image_digest` (e.g. `sha256:abc123…`; empty string when `push: false`). **The digest value already includes the `sha256:` prefix** — that's what `docker/build-push-action@v6` emits; do NOT prepend it again or `kubectl set image @sha256:sha256:…` will produce an unpullable reference
+- [ ] Tag computation matches §5.1 + Appendix A.2 (immutable `:sha-*`, branch-snapshot on push, semver on tag push) — only when `push: true`
+- [ ] GHA cache wired (`cache-from: type=gha, cache-to: type=gha,mode=max`) — preserves layer cache even on build-only runs
+- [ ] **Visibility flip (after successful push only):** attempts to set the GHCR package visibility to public via `gh api -X PATCH`. Uses the org-package endpoint (`/orgs/{owner}/packages/container/{name}/visibility`) when `${{ github.repository_owner }}` is an Organization, the user-package endpoint (`/users/{owner}/packages/container/{name}/visibility`) otherwise. Discriminate via `gh api /users/{owner} --jq '.type'`. See §7.4. **Skipped entirely when `push: false`**
 - [ ] **Idempotent visibility flip:** if the GET returns the package is already public, skip the PATCH and log "already public, no change". If the package does not exist (e.g., the build push failed earlier in the action), skip silently
 - [ ] **Visibility flip is soft-fail:** if the PATCH returns a 4xx (e.g., the runner lacks admin permission), log a warning with the response body and `SETTINGS-APPLY` re-run instructions (`gh workflow run settings-apply.yml`), but do NOT fail the job. Cluster pulls fail later if visibility isn't fixed — better to surface that in the deploy step than block the build entirely
 - [ ] **Action pinning:** all third-party actions pinned to a full commit SHA with a version comment (e.g., `uses: docker/build-push-action@<40-char-sha>  # v6.x.y`). Matches existing repo convention (see `.github/actions/java-build/action.yml`)
 - [ ] No hardcoded secrets
 
-**Reference:** Design doc §5.1 + Appendix A.2 + §7.4 + §9.3 W2/W12. Companion visibility helper: `SETTINGS-APPLY`'s `reconcile-ghcr-visibility.sh` (#25) factors the same flip logic.
+**Reference:** Design doc §5.1 + Appendix A.2 + §5.5 (trust boundary, even though the gating expression lives in W5a/W5b) + §7.4 + §9.3 W2/W12. Companion visibility helper: `SETTINGS-APPLY`'s `reconcile-ghcr-visibility.sh` (#25) factors the same flip logic. Caller wiring: W5a (#22) — passes `push:` from a trust-clause expression.
 
-**Out of scope:** Wiring into validate.yml (W5a). Image retention policy (W11). Re-running Maven (the JAR is consumed from `java-build`'s artifact upload).
+**Out of scope:** Wiring into validate.yml (W5a). The trust-clause expression itself (W5a). Image retention policy (W11). Re-running Maven (the JAR is consumed from `java-build`'s artifact upload).
 
 ---
 
@@ -333,13 +339,16 @@ Create `.github/actions/integration-test/action.yml` per §5.3 contract and Appe
 **Slot:** `W5a` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** `W1`, `W2` &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
-First half of the original `W5` slot, scoped to Build PR (see [Upstream PR scope](#upstream-pr-scope)). Two changes to `validate.yml`:
+First half of the original `W5` slot, scoped to Build PR (see [Upstream PR scope](#upstream-pr-scope)). Three changes to `validate.yml`:
 
 1. **Wire `MAVEN_PROFILE`** into the existing `java-build` job invocation. `W1` added the `maven_profile` input to the action; without this wiring step, every fork's CI continues to build all provider profiles (D5 / ADR-035 was never realized). Pass `${{ vars.MAVEN_PROFILE }}` — if the variable is unset (forks not yet onboarded), behavior is unchanged from today (no `-P` flag, full-profile build).
-2. **Append the `docker-build` job** after `java-build`. Outputs `image_repository` and `image_digest`. No §5.5 trust-boundary `if:` clause here — that lands with `W5b` in Deploy PR. In the Build PR's window, `docker-build` runs on every event type including `pull_request_target` and external-fork PRs; the surface area is "wasted GHCR image with PR commit SHA" not "cluster credential leak" (no cluster credential is in play yet). Per D12, no changes to `build.yml` — build.yml stays full-profile to preserve cross-provider breakage signal (see [Upstream PR scope](#upstream-pr-scope) for rationale).
+2. **Append the `docker-build` job** after `java-build`. Outputs `image_repository` and `image_digest`. The job runs on every event type so PR authors get build-validation feedback even on untrusted events.
+3. **Gate the GHCR push** via the docker-build action's `push` input (from `W2`). Untrusted events (`pull_request_target`, `dependabot[bot]`, external-fork PR) build the image but DO NOT push it to GHCR — building is sandboxed in the runner; publishing to the org/package namespace is what needs the trust gate. The full §5.5 trust-boundary `if:` clause that gates `deploy` + `integration-test` jobs lands with `W5b` in Deploy PR; this push gate is the build-PR-window slice of that same boundary, applied at the action input rather than the job `if:` so untrusted PRs still get Dockerfile-compiles signal.
+
+Per D12, no changes to `build.yml` — build.yml stays full-profile to preserve cross-provider breakage signal (see [Upstream PR scope](#upstream-pr-scope) for rationale).
 
 **Task:**
-Edit `.github/template-workflows/validate.yml` to (a) pass `maven_profile: ${{ vars.MAVEN_PROFILE }}` to the existing java-build action invocation, and (b) add one new job (`docker-build`) after `java-build`.
+Edit `.github/template-workflows/validate.yml` to (a) pass `maven_profile: ${{ vars.MAVEN_PROFILE }}` to the existing java-build action invocation, and (b) add one new job (`docker-build`) after `java-build` that passes a push-gate expression to the docker-build action.
 
 **Files:**
 - `.github/template-workflows/validate.yml`
@@ -349,15 +358,28 @@ Edit `.github/template-workflows/validate.yml` to (a) pass `maven_profile: ${{ v
 - [ ] One new job `docker-build` appended after `java-build`, gated on `needs.java-build.outputs.build_result == 'success'`
 - [ ] **Job `name:` field is exactly `🐳 Docker Build`** — character-for-character match with the required-check context in `W10`'s `default-branch.json`. Without exact alignment, branch protection leaves PRs permanently blocked on a check that never reports
 - [ ] Job calls `./.github/actions/docker-build` with the contract from `W2` and passes `jar_artifact_name` matching the artifact name `java-build` uploads. The docker-build action consumes the JAR artifact; **no second Maven invocation in validate.yml**
-- [ ] Outputs `image_repository` and `image_digest` exposed at the job level for downstream consumption (W5b consumes these in Deploy PR)
-- [ ] `permissions:` block on the docker-build job includes `packages: write`, `contents: read`
+- [ ] **`push:` input wired to the trust-clause expression**: the docker-build job passes the boolean below to the action's `push:` input. Exact form (this is the build-PR-window slice of the §5.5 boundary that W5b will fully express on `deploy`/`integration-test`):
+  ```yaml
+  with:
+    push: |
+      ${{
+        github.actor != 'dependabot[bot]' &&
+        github.event_name != 'pull_request_target' &&
+        (github.event_name != 'pull_request' ||
+         github.event.pull_request.head.repo.full_name == github.repository)
+      }}
+  ```
+  When this evaluates to `false` (untrusted PR / pull_request_target / dependabot), W2's action builds the image to validate the Dockerfile but skips the GHCR push and visibility flip, and emits an empty `image_digest`. When `true` (trusted push / internal PR / `workflow_dispatch`), the action pushes and tags as normal
+- [ ] Outputs `image_repository` and `image_digest` exposed at the job level. Downstream consumers (W5b's deploy job in Deploy PR) must tolerate empty `image_digest` — when the trust gate skipped push, there's nothing to deploy and the deploy job won't run anyway because W5b's `if:` clause excludes the same events. The contract: `image_digest != ''` ⇔ image was pushed
+- [ ] `permissions:` block on the docker-build job includes `packages: write` (required even for build-only because the action's GHCR login step still runs), `contents: read`
 - [ ] `code-validation` job unchanged; `java-build` job changed only by the new `maven_profile` input (no other behavior change)
 - [ ] **No changes to `build.yml`** — full-profile build preserved there for cross-provider signal
-- [ ] **No §5.5 trust-boundary `if:` clause** — that lands with W5b. Dependabot may also run docker-build; that's fine for the Build PR's window
+- [ ] **Step summary on the docker-build job clearly states "pushed" vs. "build-only (push gated off)"** so PR reviewers can tell at a glance whether a GHCR artifact exists for this commit
+- [ ] **No §5.5 trust-boundary `if:` clause** on the job itself — the gate is on the action input, not the job's existence. That lands as a job-level `if:` with W5b for deploy + integration-test
 
-**Reference:** Design doc §5.4 + §9.5.A (Build PR scope) + Appendix A.1. Check-name contract: `W10` (#8).
+**Reference:** Design doc §5.4 + §5.5 + §9.5.A (Build PR scope) + Appendix A.1. Check-name contract: `W10` (#8). Action push input: `W2` (#3).
 
-**Out of scope:** `deploy` and `integration-test` jobs (`W5b`). The §5.5 trust-boundary `if:` clause (`W5b`). `workflow_dispatch force_full_pipeline` (#19 / W5b). Branch-protection changes (`W10`). Modifying `build.yml` (full-profile stays).
+**Out of scope:** `deploy` and `integration-test` jobs (`W5b`). The §5.5 trust-boundary `if:` clause on downstream jobs (`W5b`). `workflow_dispatch force_full_pipeline` (#19 / W5b). Branch-protection changes (`W10`). Modifying `build.yml` (full-profile stays).
 
 ---
 
@@ -506,6 +528,8 @@ If any of these change (here or in `W5a`/`W5b`), all three must update in lockst
 - **Pass 1 merge** waits on `W5a` (#22) merged AND first green docker-build run on partition observed
 - **Pass 2 merge** waits on `W5b` (#6) merged AND first green deploy+integration-test run on partition observed
 
+**Per-fork activation — canonical JSON describes fully-onboarded state; `SETTINGS-APPLY` filters per-fork.** The canonical `default-branch.json` shipped by this issue lists **all three** required checks once Pass 2 lands (`🐳 Docker Build`, `🚀 Deploy to spi-stack`, `🧪 Integration Tests`). But forks that haven't completed cluster-side onboarding don't have `AZURE_CLIENT_ID` and can't run deploy/integration-test — applying the full canonical ruleset to such a fork blocks every PR on checks that can never report. The propagation layer (`SETTINGS-APPLY` #25) is responsible for **per-fork filtering**: before PUT-updating a fork's ruleset, it reads the fork's repo secrets and, if `AZURE_CLIENT_ID` is absent, strips `🚀 Deploy to spi-stack` and `🧪 Integration Tests` from the `required_status_checks` payload. When the operator runs `spi onboard` and `AZURE_CLIENT_ID` lands, the next `settings-apply` run reconciles back to the full check set. **W10's job here is to ship the canonical "fully-onboarded" JSON**; SETTINGS-APPLY's job is to make the per-fork application safe.
+
 **Acceptance criteria:**
 - [ ] **Pass 1:** `🐳 Docker Build` present in `default-branch.json` required checks; exact string match with `W5a`'s docker-build job `name:`. **Hold merge until W5a is green on partition** (per Sequencing above)
 - [ ] **Pass 2:** `🚀 Deploy to spi-stack` + `🧪 Integration Tests` present in `default-branch.json` required checks; exact string match with `W5b`'s deploy + integration-test job `name:` fields. **Hold merge until W5b is green on partition**
@@ -634,6 +658,31 @@ Implement `spi onboard --service <name> --repo <org/repo> --aks-cluster <cluster
 
 ---
 
+### STACK-OPS (tracking): Operational tools for permanent suspended-Flux CI mode
+
+**Slot:** `STACK-OPS` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Target repo:** `danielscholl-osdu/osdu-spi-stack` &nbsp;|&nbsp; **Ships in:** Deploy PR — these tools live on the cluster operator side and are needed for the design's permanent-suspended-Flux invariant to actually be operable
+
+**Tracking issue — implementation lives in `osdu-spi-stack`** (same pattern as `ONBOARD` / #12). Design doc §8.4 + §8.5 describe operating controls that the cluster operator needs to keep CI-mode steady, but they have no work item yet. This stub exists so the epic's sub-issue rollup tracks them.
+
+**Three deliverables in `osdu-spi-stack`** (each can be its own sub-issue there, or one combined issue — operator's call):
+
+1. **`spi cluster baseline-refresh` subcommand** (design §8.4). Coordinated rebase to the HelmRelease baseline across all 8 forks: (a) announce CI freeze, (b) verify no in-flight workflow runs across forks (`gh run list --status in_progress`), (c) `flux resume kustomization --all -n flux-system` and wait for convergence, (d) `flux suspend` to return to CI mode, (e) announce CI unfrozen. Mirrors the manual procedure in §8.4 step-for-step. Idempotent; `--dry-run` for plan-only.
+
+2. **Service health badge cron + endpoint** (design §8.5). A 5-minute scheduled workflow in `osdu-spi-stack` that probes each service's `/info` endpoint via the gateway and writes a status badge to the stack repo README. Lets a PR author quickly check "is the cluster healthy right now?" before assuming a test failure is their bug. Per-service health rows so contamination is attributable.
+
+3. **Flux drift / unexpected-resume alerting** (design §7.5 + §8.4). A cron that checks `flux get kustomizations -n flux-system` and alerts (issue or chat ping — operator's choice) if any kustomization is no longer suspended. Defense in depth against accidental resume; complements the `aks-deploy` pre-flight check that catches the same drift at PR-time.
+
+**Why this is in the Deploy PR lane.** These tools are needed for Deploy PR's deploy mechanism to be operationally sound — without `baseline-refresh` there's no way to recover from a wedged cluster state; without the health badge PR authors can't distinguish service bugs from infra bugs; without drift alerting the suspended-Flux invariant is unenforced. None of them block the Build PR.
+
+**Out of scope for this stub** (handled in the linked `osdu-spi-stack` issue when filed):
+- Implementation details of each subcommand / workflow
+- Integration with whatever notification channel the operator picks (issue / chat / email)
+- Backfilling alert history
+
+**Reference:** Design doc §7.5, §8.4, §8.5. Companion cluster-side issue: `osdu-spi-stack` (file when ready). Tracking pattern: same as `ONBOARD` (#12) + `osdu-spi-stack#32`.
+
+---
+
 ### SETTINGS-APPLY: Settings reconciliation workflow + idempotent setup-rulesets.sh
 
 **Slot:** `SETTINGS-APPLY` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR
@@ -646,9 +695,10 @@ This slot closes all gaps: makes the rulesets helper idempotent, **relocates it 
 **Task:**
 Five coordinated changes:
 
-1. **Make `setup-rulesets.sh` idempotent + relocate to durable path.**
+1. **Make `setup-rulesets.sh` idempotent + relocate to durable path + per-fork filter for unmet prerequisites.**
    - Move `.github/local-actions/init-helpers/setup-rulesets.sh` → `.github/scripts/settings-apply/setup-rulesets.sh`.
    - Update the script logic: probe for an existing ruleset by name via `GET /repos/{owner}/{repo}/rulesets`; if present, `PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}` to replace; if absent, keep today's `POST` create path. Add a `--dry-run` mode that prints the planned changes without applying.
+   - **Per-fork required-check filtering.** Before submitting the ruleset payload, probe the fork for prerequisites and strip checks whose prerequisites are unmet. Today: if `AZURE_CLIENT_ID` is absent on the fork (probed via `gh secret list | grep -q AZURE_CLIENT_ID`), strip `🚀 Deploy to spi-stack` and `🧪 Integration Tests` from `parameters.required_status_checks`. `🐳 Docker Build` is always retained. Log the filter decision to step summary so operators can see *why* deploy/test checks aren't enforced yet. When `spi onboard` later writes `AZURE_CLIENT_ID`, the next run sees it present and re-PUT-updates the ruleset with the full canonical check set. This is what makes W10's "canonical fully-onboarded JSON" + per-fork heterogeneity safe.
    - Update `.github/workflows/init-complete.yml`'s `Setup Repository Rulesets` step (around lines 342-348) to call the script from its new location. The temp-location preservation pattern (lines 290-302) becomes unnecessary for this script — it's now durable in `.github/scripts/settings-apply/`, which is not in `cleanup_rules`.
 
 2. **Add new helper scripts at the durable path.**
@@ -692,7 +742,8 @@ Five coordinated changes:
 
 **Acceptance criteria:**
 - [ ] `setup-rulesets.sh` is idempotent: on a fork where `Default Branch Protection` already exists, re-running the script with an updated `default-branch.json` results in PUT to the existing ruleset id; on a fork without rulesets, behaviour is unchanged from today (POST creates). Same for `Integration Branch Protection`. Action plan per ruleset (create / update / no-change) logged to step summary
-- [ ] `setup-rulesets.sh --dry-run` prints the planned actions per ruleset without calling the mutating API
+- [ ] **Per-fork required-check filter**: before PUT/POST, the script probes whether `AZURE_CLIENT_ID` is set on the fork (`gh secret list --json name --jq '.[].name' | grep -q '^AZURE_CLIENT_ID$'`). If absent, the script strips `🚀 Deploy to spi-stack` and `🧪 Integration Tests` from `parameters.required_status_checks` before submitting; `🐳 Docker Build` is always retained. The filter decision is logged: `"AZURE_CLIENT_ID absent — deploy + integration-test checks NOT enforced on this fork; run spi onboard then re-dispatch settings-apply.yml to enable"`. When `AZURE_CLIENT_ID` is later set and the workflow re-runs, the unfiltered canonical ruleset is restored
+- [ ] `setup-rulesets.sh --dry-run` prints the planned actions per ruleset, **including the filter decision** (which checks would be retained vs stripped), without calling the mutating API
 - [ ] `setup-rulesets.sh` is at `.github/scripts/settings-apply/setup-rulesets.sh`. The old `.github/local-actions/init-helpers/setup-rulesets.sh` is deleted. `init-complete.yml`'s `Setup Repository Rulesets` step is updated to call the new path; the script no longer appears in the temp-location preservation block at lines 290-302
 - [ ] **`settings-apply.yml`'s `paths:` filter** matches the relocated layout exactly: `['.github/rulesets/**', '.github/scripts/settings-apply/**']` — covers both ruleset JSON changes and helper-script changes
 - [ ] `settings-apply.yml` requires `permissions: contents: read, issues: write, administration: write` (rulesets API needs admin; opening/updating issues needs `issues: write`). Workflow documents that it must run as a GitHub App token (the default `GITHUB_TOKEN` lacks ruleset write)
@@ -1017,25 +1068,29 @@ Add a `workflow_dispatch` "force-full-pipeline" input to `.github/template-workf
 **Context:**
 §8.9 of the design doc documents a manual `restore-deployment` workflow_dispatch that operators invoke when a bad deploy is contaminating cross-service tests:
 ```
-gh workflow run restore-deployment.yml -f service=partition -f digest=sha256:<previous-good>
+gh workflow run restore-deployment.yml -f digest=sha256:<previous-good> -R <org>/<service>
 ```
 W3's `aks-deploy` action emits `previous_digest` precisely so this workflow has a target. Without W14, that output is dead-weight — there is no consumer, and §8.9's restore loop is undeliverable.
 
+**Single-service workflow — read service identity from `vars.SERVICE_NAME`, not an input.** Each fork hosts exactly one service, and `vars.SERVICE_NAME` is the canonical identity (set by `ONBOARD-INIT-A` on fresh forks; surfaced as a `human-required` issue by `SETTINGS-APPLY` on existing forks). Taking `service` as a `workflow_dispatch` input would let an operator dispatch with `service=storage` in the partition fork and accidentally point the partition Deployment at storage's image. Dropping the input forces the workflow to operate on the fork's own service every time.
+
 **Task:**
-Create `.github/template-workflows/restore-deployment.yml`. The workflow takes a service name and a known-good digest as `workflow_dispatch` inputs and calls `./.github/actions/aks-deploy` to roll the named Deployment back to that digest. Skip docker-build entirely — the image already exists in GHCR.
+Create `.github/template-workflows/restore-deployment.yml`. Takes a single `workflow_dispatch` input (`digest`) and rolls the fork's Deployment back to that digest. Skip docker-build entirely — the image already exists in GHCR.
 
 **Files:**
 - `.github/template-workflows/restore-deployment.yml` (new)
 
 **Acceptance criteria:**
-- [ ] `workflow_dispatch` inputs: `service` (required string — used in run-name and log lines), `digest` (required string, must start with `sha256:`)
-- [ ] Validates digest format at the very first step: regex `^sha256:[a-f0-9]{64}$`; fails with a clear message if the input doesn't match (catches the "double sha256:" foot-gun and typos before kubectl ever runs)
-- [ ] Same trust-boundary protection as deploy: `permissions: id-token: write, contents: read`; federated identity via `azure/login@v2` (composite action already does the login, but workflow must grant the permission)
-- [ ] Per-service concurrency group `spi-stack-${{ inputs.service }}` matching the deploy job's group (per-service, `cancel-in-progress: false`) — prevents racing a restore against an in-flight PR's deploy
+- [ ] **`workflow_dispatch` inputs: `digest` only** (required string, must start with `sha256:`). **No `service` input** — the workflow reads `vars.SERVICE_NAME` to identify the target service; this prevents the operator-error path where the dispatched service name doesn't match the fork's actual service and the workflow deploys the wrong image into the fork's Deployment
+- [ ] **Pre-flight: `vars.SERVICE_NAME` must be set.** First step asserts the variable is non-empty; fails with a clear error directing the operator to set it (via `gh variable set SERVICE_NAME=<name>` or via `SETTINGS-APPLY`'s `human-required` issue) before retrying. This catches forks where onboarding hasn't completed
+- [ ] Validates digest format: regex `^sha256:[a-f0-9]{64}$`; fails with a clear message if the input doesn't match (catches the "double sha256:" foot-gun and typos before kubectl ever runs)
+- [ ] Same trust-boundary protection as deploy: `permissions: id-token: write, contents: read`; federated identity via `azure/login@<sha>  # v2.x` (composite action already does the login, but workflow must grant the permission)
+- [ ] Per-service concurrency group `spi-stack-${{ vars.SERVICE_NAME }}` matching the deploy job's group (per-service, `cancel-in-progress: false`) — prevents racing a restore against an in-flight PR's deploy
 - [ ] Resolves per-service variables (`K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`) and org variables (`K8S_NAMESPACE`, `AKS_RESOURCE_GROUP`, `AKS_CLUSTER_NAME`) identically to the deploy job in `validate.yml`
-- [ ] Composes the image reference as `ghcr.io/${{ github.repository_owner }}/${{ inputs.service }}@${{ inputs.digest }}` and passes it to `aks-deploy` as `image_repository` + `image_digest`
-- [ ] Run-name surfaces the action: `restore ${{ inputs.service }} → ${{ inputs.digest }}` so the Actions UI shows what happened without drilling into logs
-- [ ] Step summary captures: who triggered, which service, which digest, which deployment, and the `aks-deploy` `previous_digest` / `deployed_digest` outputs — for audit
+- [ ] Composes the image reference as `ghcr.io/${{ github.repository_owner }}/${{ vars.SERVICE_NAME }}@${{ inputs.digest }}` and passes it to `aks-deploy` as `image_repository` + `image_digest`
+- [ ] Run-name surfaces the action: `restore ${{ vars.SERVICE_NAME }} → ${{ inputs.digest }}` so the Actions UI shows what happened without drilling into logs
+- [ ] Step summary captures: who triggered, which service (from `vars.SERVICE_NAME`), which digest, which deployment, and the `aks-deploy` `previous_digest` / `deployed_digest` outputs — for audit
+- [ ] **Action pinning:** any third-party actions pinned to full SHA with version comment matching repo convention
 - [ ] **Hard-blocked from merging until W3 (`aks-deploy` action) merges**
 
 **Reference:** Design doc §8.9 + §5.2 (`aks-deploy` contract).
