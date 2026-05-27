@@ -987,11 +987,11 @@ NG5 ("CI cluster is allowed to remain in a broken state between runs; next run o
 **Mitigations (combined):**
 
 - **Cross-service health probe** (per-service `ACCEPTANCE_TEST_DEPENDENCIES` map declares which dependencies to check, see §5.3 + §7.3): before running tests, GET each dependency's `/info` endpoint. The probe result populates `cluster_state` (`healthy` / `contaminated`) and drives a PR label. **It never changes the job exit code** — required-check semantics (G2) are preserved. See §5.3 exit-code table.
-- **Manual `restore-deployment` workflow** (in scope for v1; modifies NG5; **implemented by W14** at `.github/template-workflows/restore-deployment.yml`): the deploy step captures `previous_digest` before patching. A workflow_dispatch-triggered job lets an operator restore a service to its last-known-good digest:
+- **Manual `restore-deployment` workflow** (in scope for v1; modifies NG5; **implemented by W14** at `.github/template-workflows/restore-deployment.yml`): the deploy step captures `previous_digest` before patching. A workflow_dispatch-triggered job lets an operator restore a service to its last-known-good digest. **No `service` input** — the workflow reads `vars.SERVICE_NAME` to identify the target service (prevents the operator-typo path where dispatching with a wrong service name deploys the wrong image into the fork's Deployment):
   ```
   gh workflow run restore-deployment.yml \
-    -f service=partition \
-    -f digest=sha256:<previous-good-digest>
+    -f digest=sha256:<previous-good-digest> \
+    -R <org>/<service>
   ```
   This is for the common case where one bad deploy is poisoning everyone else's tests and you want to unstick the cluster without waiting for the original PR author to push a fix. Not auto-triggered — humans decide when to use it.
 - **Dependency graph documentation**: each service's acceptance tests document which other services they call via the per-service `ACCEPTANCE_TEST_DEPENDENCIES` variable. Phase 5 captures this. Tests that depend on multiple other services are higher contamination risk.
@@ -1148,9 +1148,9 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 | W9 | Flux-suspend assertion in deploy action | Inside `aks-deploy/action.yml` (pre-check) + `integration-test` post-rollout digest check (§5.3) |
 | W10 | Update branch-protection rulesets to add new required checks | Modify `.github/rulesets/default-branch.json` to require `🐳 Docker Build`, `🚀 Deploy to spi-stack`, `🧪 Integration Tests` on PRs to `main`. Verify init workflow / template-sync propagates the rule update to existing forks. |
 | W11 | Image-retention scheduled workflow | New `.github/template-workflows/ghcr-retention.yml` runs weekly, deletes GHCR tags per §8.5 policy. |
-| W12 | GHCR-visibility verification step | Step inside `docker-build` action that checks the package is public; fails the job (with a clear error pointing operators to re-dispatch `init.yml` — Phase 3 §9.4.B — to flip visibility) if not. |
+| W12 | GHCR-visibility flip in `docker-build` action | **Folded into W2.** When `push: true`, the action attempts to flip the package to public (idempotent — no-op if already public; soft-warn if the PATCH fails so the build isn't blocked on a single fork's missing admin permission). Existing-fork reconciliation of visibility lives in `SETTINGS-APPLY`'s `reconcile-ghcr-visibility.sh` (same logic, scheduled). The old "fail and tell operator to re-dispatch init.yml" path is gone — `init.yml` is fresh-fork-only and cannot be re-dispatched. |
 | W13 | Add `workflow_dispatch` "force-full-pipeline" path to validate.yml | Today `validate.yml` `paths-ignore` excludes `.github/actions/**` and `.github/template-workflows/**`. That means template-sync PRs whose ONLY change is workflow/action files **do not trigger validate.yml**, breaking the sandbox→partition iteration loop. Fix: add a `workflow_dispatch` input that forces the new deploy/test stages to run against the current HEAD regardless of paths-ignore, so the operator can manually trigger a verification run after each template-sync. Document the trigger explicitly in W5 acceptance criteria. |
-| W14 | New `template-workflows/restore-deployment.yml` workflow | Consumes W3's `previous_digest` output (or any known-good digest copied from a prior run's logs). `workflow_dispatch` with `service` + `digest` inputs; validates digest format; same trust-boundary protection and per-service concurrency as the deploy job; calls `aks-deploy` directly with the supplied digest. Without W14, `previous_digest` is dead-weight and §8.9's restore loop is undeliverable. |
+| W14 | New `template-workflows/restore-deployment.yml` workflow | Consumes W3's `previous_digest` output (or any known-good digest copied from a prior run's logs). `workflow_dispatch` with **`digest` input only** (no `service` input — reads `vars.SERVICE_NAME` to identify the fork's service, preventing operator-typo cross-deploys); validates digest format; same trust-boundary protection and per-service concurrency as the deploy job; calls `aks-deploy` directly with the supplied digest. Without W14, `previous_digest` is dead-weight and §8.9's restore loop is undeliverable. |
 
 **Per work item:** PR in sandbox → template-sync pushes to partition → operator manually triggers `validate.yml` via `workflow_dispatch` on partition (because template-sync changes are paths-ignored) → debug → iterate.
 
@@ -1661,10 +1661,21 @@ outputs:
     value: ${{ steps.tag.outputs.image_repository }}
   image_digest:
     value: ${{ steps.push.outputs.digest }}   # sha256:... from docker/build-push-action
+inputs:
+  push:
+    description: "Push image to GHCR after build (string 'true'/'false' — composite inputs are strings)"
+    required: false
+    default: 'true'
+  # ... plus dockerfile_path, build_context, image_name, registry, org, jar_artifact_name, build_args
 runs:
   using: composite
   steps:
+    # GHCR login runs ONLY when push == 'true'. On push == 'false' (untrusted PR / pull_request_target /
+    # dependabot in W5a's validate-only job), the GHCR token is never wired into docker auth — even if
+    # the calling job were granted packages: write, the action wouldn't use it. This is the "at minimum"
+    # mitigation; W5a's two-job split is the preferred boundary (no packages: write on the untrusted job).
     - name: Log in to GHCR
+      if: ${{ inputs.push == 'true' }}
       shell: bash
       run: echo "${{ github.token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
     - name: Compute tags
@@ -1674,33 +1685,46 @@ runs:
         SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-12)
         IMAGE="${{ inputs.registry }}/${{ inputs.org }}/${{ inputs.image_name }}"
         echo "image_repository=${IMAGE}" >> $GITHUB_OUTPUT
-        # Always tag with sha-* (for humans; deploy uses the digest, not this tag)
+        # Always compute :sha-* (for humans; deploy uses the digest, not this tag)
         TAGS="${IMAGE}:sha-${SHORT_SHA}"
-        # On protected-branch push, also tag with <branch>-snapshot (matches Maven revision)
-        if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "branch" ]]; then
-          BRANCH_SLUG="${GITHUB_REF_NAME//\//-}"
-          TAGS="${TAGS},${IMAGE}:${BRANCH_SLUG}-snapshot"
-        fi
-        # On tag push (release-please), also tag with the semver
-        if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-          TAGS="${TAGS},${IMAGE}:${GITHUB_REF_NAME}"
+        # The remaining tags are only meaningful when pushing
+        if [[ "${{ inputs.push }}" == "true" ]]; then
+          # On protected-branch push, also tag with <branch>-snapshot (matches Maven revision)
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "branch" ]]; then
+            BRANCH_SLUG="${GITHUB_REF_NAME//\//-}"
+            TAGS="${TAGS},${IMAGE}:${BRANCH_SLUG}-snapshot"
+          fi
+          # On tag push (release-please), also tag with the semver
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAGS="${TAGS},${IMAGE}:${GITHUB_REF_NAME}"
+          fi
         fi
         echo "tags=${TAGS}" >> $GITHUB_OUTPUT
     - uses: docker/setup-buildx-action@v3
-    - name: Build & push
+    - name: Build (and optionally push)
       id: push
       uses: docker/build-push-action@v6
       with:
         context: ${{ inputs.build_context }}
         file: ${{ inputs.dockerfile_path }}
-        push: true
+        push: ${{ inputs.push == 'true' }}
         tags: ${{ steps.tag.outputs.tags }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
     # steps.push.outputs.digest is the canonical immutable identifier callers should use
     # when composing the deploy reference: ${image_repository}@${image_digest}
+    # When push == 'false' the action emits an empty digest; the caller (W5a's two-job split) ensures
+    # only the trusted-push job's outputs are consumed downstream (W5b's deploy needs the digest).
     # IMPORTANT: docker/build-push-action emits `digest` already prefixed with "sha256:".
     # Do not prepend "sha256:" again — that produces an invalid "@sha256:sha256:..." reference.
+    - name: Flip GHCR package visibility to public
+      if: ${{ inputs.push == 'true' && steps.push.outputs.digest != '' }}
+      shell: bash
+      run: |
+        # Org vs user endpoint discrimination per §7.4; idempotent (no-op if already public);
+        # soft-fail on 4xx (log warning + settings-apply re-run instructions, don't fail the job).
+        # Detail in W2 acceptance criteria.
+        : # ...
 ```
 
 **A.3. `aks-deploy/action.yml` sketch:**

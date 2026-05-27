@@ -102,6 +102,7 @@ graph TD
         W13["W13<br/>workflow_dispatch<br/>force-full-pipeline"]:::deploy
         W14["W14<br/>restore-deployment"]:::deploy
         ONBOARD["ONBOARD<br/>spi onboard CLI<br/>(cross-repo)"]:::deploy
+        STACK_OPS["STACK-OPS<br/>baseline-refresh + health badge<br/>+ drift alerting (cross-repo)"]:::deploy
         ONBOARD_INIT_B["ONBOARD-INIT-B<br/>AZURE_* + ACCEPTANCE_TEST_*"]:::deploy
         ADR32["ADR-032"]:::adr
         ADR34["ADR-034"]:::adr
@@ -156,7 +157,7 @@ The wave order is **build-lane first** because the Build PR is the priority upst
 |------|-------|----------------|
 | **1 — ground the design** | `ADR-032`, `ADR-034`, `ADR-036`, `SPECS-B` | Docs-only; ADR-036 codifies the §5.5 trust boundary that W5b enforces |
 | **2 — composite actions** | `W3`, `W4`, `W8` | The deploy-path code. Hard-blocked from merging until Phase 0 gates 0a/0b/0d/0e/0f close — scaffolding with documented assumptions is the expected pattern |
-| **3 — onboarding (both sides)** | `ONBOARD` (cross-repo, in `osdu-spi-stack`), `ONBOARD-INIT-B` (this repo) | Cluster-side IAM + fork-side `AZURE_*` check + remaining per-service vars. No contention between them |
+| **3 — onboarding + cluster operations (cross-repo)** | `ONBOARD` (`osdu-spi-stack`), `STACK-OPS` (`osdu-spi-stack` — baseline-refresh + health badge + drift alerting), `ONBOARD-INIT-B` (this repo) | Cluster-side IAM (`spi onboard`) + cluster-side ops tooling (`spi cluster baseline-refresh`, health badge cron, Flux drift alerting) + fork-side `AZURE_*` check + remaining per-service vars. The two stack-side issues are independent — fan out together |
 | **4 — wire it together** | `W13`, `W5b`, `W14`, `W10` (second pass) | `W5b` blocked by `W3`, `W4`, `W13`. `W14` blocked by `W3`. `W10`'s second pass adds `deploy` and `integration-test` to required checks |
 
 **Phase 0 runs in parallel with all waves**, human-driven. Gate findings may trigger small revisions to deploy-lane wave 2 (e.g., Gate 0b might flip `W3`'s RoleBinding form). Plan for that — it's normal, not a setback. Build-lane work is largely insensitive to gate findings other than 0c.
@@ -236,38 +237,37 @@ Add an optional input `maven_profile` to the action. When set, the Maven command
 The new pipeline needs a composite action that builds a service container image from the Maven JAR artifacts and pushes it to GHCR. Image references are immutable per SHA (`:sha-<short>`), with additional mutable tags for branches (`:<branch>-snapshot`) and release-please versions (`:<version>`). Also verifies the GHCR package is public (W12 — covered by this issue).
 
 **Task:**
-Create `.github/actions/docker-build/action.yml` per the Appendix A.2 sketch in the design doc.
+Create `.github/actions/docker-build/action.yml`. The action has two modes selected by a `push` input. The trust boundary lives in the calling workflow (W5a's two-job split); this action's job is to honor `push` without ever quietly using the GHCR token when `push: 'false'`.
 
 The action:
 - Downloads the JAR artifact produced by the caller's preceding `java-build` job (does NOT re-run Maven)
-- **Always builds the image** — gives untrusted PRs the "your Dockerfile compiles" feedback signal
-- **Conditionally pushes to GHCR** based on the caller-supplied `push` input — the trust gate lives in the calling workflow (W5a), not inside the action
-- Computes tags: `:sha-<short>` always (whether pushed or not), `:<branch>-snapshot` on push, `:<version>` on tag push
-- Uses `docker/build-push-action@v6` with GHA layer cache; the action's own `push:` input is wired from this composite action's `push:` input
-- After a successful push, attempts to flip GHCR package visibility to public (idempotent — no-op if already public; soft-warns if the API call fails so the deploy isn't blocked on a single fork's missing admin permission)
+- **Always builds the image** via `docker/build-push-action@v6` with GHA layer cache
+- **When `inputs.push == 'true'`** — runs the GHCR login step, pushes the image, computes branch-snapshot / version tags, runs the visibility flip
+- **When `inputs.push == 'false'`** — **skips GHCR login entirely** (so the GITHUB_TOKEN is never used for registry auth), skips push, skips tag computation beyond `:sha-<short>`, skips the visibility flip, emits an empty `image_digest` output. The build still validates that the Dockerfile compiles; the result stays on the runner
 
-**Why the push gate.** W5a fires docker-build on every event including `pull_request_target` and external-fork PRs (no §5.5 `if:` clause in the Build PR window — see W5a). The job carries `packages: write`. Without a push gate, untrusted PR code could produce **public** container images under the org/package namespace, which a downstream consumer (or the deploy step in the Deploy PR once it lands) might trust as if canonical. The fix is to keep the *build* unrestricted (so PR authors get build-validation feedback) but gate the *push* on the same trust-boundary clause that W5b puts on deploy/integration-test. Build-without-push is a low-risk operation: the runner is sandboxed, no Azure creds are in play, and the resulting image never leaves the runner.
+**Threat model.** `packages: write` on a job that runs untrusted code (`pull_request_target`, external-fork PR head) is a privilege-escalation surface even if push: false is honored — a malicious Dockerfile or build step could attempt to use the runner-level token. W5a closes this by splitting into two jobs: a validate-only `🐳 Docker Build` job (no `packages: write`, this action with `push: 'false'`) and a trusted-only `🐳 Docker Push` job (has `packages: write`, this action with `push: 'true'`, gated by §5.5 if:). For this action's part of the contract: when `push: 'false'`, no GHCR login step runs at all, so the token is never wired into docker auth even if the caller granted the permission. This is the "at minimum" mitigation the reviewer asked for, on top of W5a's preferred two-job split.
 
 **Files:**
 - `.github/actions/docker-build/action.yml` (new)
 
 **Acceptance criteria:**
-- [ ] Action declares inputs per §5.1 contract (`dockerfile_path`, `build_context`, `image_name`, `registry`, `org`, `jar_artifact_name`, `build_args`) **plus a new `push: { type: boolean, required: false, default: true }` input**
-- [ ] When `push: false`: action builds the image, computes the `:sha-<short>` tag for logging, but does NOT push to GHCR, does NOT compute branch-snapshot / version tags, does NOT run the visibility flip, and emits an **empty `image_digest` output** with `image_repository` still populated. Step summary clearly notes "build-only run (push gated off by caller)" so PR reviewers understand why no GHCR artifact exists
-- [ ] When `push: true` (the default): action behaves as previously specified — pushes, tags, flips visibility, emits `image_digest`
+- [ ] Action declares inputs per §5.1 contract (`dockerfile_path`, `build_context`, `image_name`, `registry`, `org`, `jar_artifact_name`, `build_args`) **plus a `push` input declared as `type: string` with `default: 'true'`**. **Composite-action inputs are always strings** — using `type: boolean` produces invalid action metadata. The action compares with `${{ inputs.push == 'true' }}` everywhere
+- [ ] **When `inputs.push == 'false'`**: action builds the image but **skips the GHCR login step entirely** (do NOT run `docker/login-action` or `docker login`). Skips push, skips visibility flip, skips branch-snapshot / version tag computation. Emits empty `image_digest`; `image_repository` still populated for logging. Step summary clearly notes "build-only run (push gated off by caller; no GHCR auth attempted)" so PR reviewers understand why no GHCR artifact exists
+- [ ] **When `inputs.push == 'true'`**: full path — login, push, tag, visibility flip
 - [ ] **Downloads the JAR artifact from a previous job** via `actions/download-artifact@<sha>` keyed off `inputs.jar_artifact_name`; uses the layout `java-build` uploaded (`provider/<service>-azure/target/*-spring-boot.jar`). **Does NOT invoke `mvn` inside the action** — Maven runs once in `java-build`; docker-build consumes its output
-- [ ] Outputs `image_repository` (e.g. `ghcr.io/<org>/<service>`; always set) and `image_digest` (e.g. `sha256:abc123…`; empty string when `push: false`). **The digest value already includes the `sha256:` prefix** — that's what `docker/build-push-action@v6` emits; do NOT prepend it again or `kubectl set image @sha256:sha256:…` will produce an unpullable reference
-- [ ] Tag computation matches §5.1 + Appendix A.2 (immutable `:sha-*`, branch-snapshot on push, semver on tag push) — only when `push: true`
-- [ ] GHA cache wired (`cache-from: type=gha, cache-to: type=gha,mode=max`) — preserves layer cache even on build-only runs
-- [ ] **Visibility flip (after successful push only):** attempts to set the GHCR package visibility to public via `gh api -X PATCH`. Uses the org-package endpoint (`/orgs/{owner}/packages/container/{name}/visibility`) when `${{ github.repository_owner }}` is an Organization, the user-package endpoint (`/users/{owner}/packages/container/{name}/visibility`) otherwise. Discriminate via `gh api /users/{owner} --jq '.type'`. See §7.4. **Skipped entirely when `push: false`**
+- [ ] Outputs `image_repository` (e.g. `ghcr.io/<org>/<service>`; always set) and `image_digest` (e.g. `sha256:abc123…`; empty string when `push == 'false'`). **The digest value already includes the `sha256:` prefix** — that's what `docker/build-push-action@v6` emits; do NOT prepend it again or `kubectl set image @sha256:sha256:…` will produce an unpullable reference
+- [ ] Tag computation matches §5.1 + Appendix A.2 (immutable `:sha-*`, branch-snapshot on push, semver on tag push) — only when `push == 'true'`
+- [ ] GHA cache wired (`cache-from: type=gha, cache-to: type=gha,mode=max`) — preserves layer cache so W5a's two builds (validate + push) hit cache on the second build
+- [ ] **Build step never receives the GITHUB_TOKEN as a build-arg or env var.** Don't `--build-arg GITHUB_TOKEN=...`, don't `env: GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}` at the `docker buildx build` step. Even on `push: 'true'`, GITHUB_TOKEN should only reach the `docker login` step
+- [ ] **Visibility flip (after successful push only):** attempts to set the GHCR package visibility to public via `gh api -X PATCH`. Uses the org-package endpoint (`/orgs/{owner}/packages/container/{name}/visibility`) when `${{ github.repository_owner }}` is an Organization, the user-package endpoint (`/users/{owner}/packages/container/{name}/visibility`) otherwise. Discriminate via `gh api /users/{owner} --jq '.type'`. See §7.4. **Skipped entirely when `push == 'false'`**
 - [ ] **Idempotent visibility flip:** if the GET returns the package is already public, skip the PATCH and log "already public, no change". If the package does not exist (e.g., the build push failed earlier in the action), skip silently
 - [ ] **Visibility flip is soft-fail:** if the PATCH returns a 4xx (e.g., the runner lacks admin permission), log a warning with the response body and `SETTINGS-APPLY` re-run instructions (`gh workflow run settings-apply.yml`), but do NOT fail the job. Cluster pulls fail later if visibility isn't fixed — better to surface that in the deploy step than block the build entirely
 - [ ] **Action pinning:** all third-party actions pinned to a full commit SHA with a version comment (e.g., `uses: docker/build-push-action@<40-char-sha>  # v6.x.y`). Matches existing repo convention (see `.github/actions/java-build/action.yml`)
 - [ ] No hardcoded secrets
 
-**Reference:** Design doc §5.1 + Appendix A.2 + §5.5 (trust boundary, even though the gating expression lives in W5a/W5b) + §7.4 + §9.3 W2/W12. Companion visibility helper: `SETTINGS-APPLY`'s `reconcile-ghcr-visibility.sh` (#25) factors the same flip logic. Caller wiring: W5a (#22) — passes `push:` from a trust-clause expression.
+**Reference:** Design doc §5.1 + Appendix A.2 + §5.5 (trust boundary, gating expressed in W5a's two-job split) + §7.4 + §9.3 W2/W12. Companion visibility helper: `SETTINGS-APPLY`'s `reconcile-ghcr-visibility.sh` (#25) factors the same flip logic. Caller wiring: W5a (#22) — two-job split, each invoking this action with a different `push` value.
 
-**Out of scope:** Wiring into validate.yml (W5a). The trust-clause expression itself (W5a). Image retention policy (W11). Re-running Maven (the JAR is consumed from `java-build`'s artifact upload).
+**Out of scope:** Wiring into validate.yml (W5a). The two-job split + trust-clause expression (W5a). Image retention policy (W11). Re-running Maven (the JAR is consumed from `java-build`'s artifact upload).
 
 ---
 
@@ -336,75 +336,44 @@ Create `.github/actions/integration-test/action.yml` per §5.3 contract and Appe
 
 ### W5a: Wire docker-build job into validate.yml (+ wire MAVEN_PROFILE into java-build)
 
-**Slot:** `W5a` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** `W1`, `W2` &nbsp;|&nbsp; **Ships in:** Build PR
+**Slot:** `W5a` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W1`, `W2` &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
-First half of the original `W5` slot, scoped to Build PR (see [Upstream PR scope](#upstream-pr-scope)). Three changes to `validate.yml`:
+First half of the original `W5` slot, scoped to Build PR. Three changes to `validate.yml`:
 
-1. **Wire `MAVEN_PROFILE`** into the existing `java-build` job invocation. `W1` added the `maven_profile` input to the action; without this wiring step, every fork's CI continues to build all provider profiles (D5 / ADR-035 was never realized). Pass `${{ vars.MAVEN_PROFILE }}` — if the variable is unset (forks not yet onboarded), behavior is unchanged from today (no `-P` flag, full-profile build).
-2. **Append the `docker-build` job** after `java-build`. Outputs `image_repository` and `image_digest`. The job runs on every event type so PR authors get build-validation feedback even on untrusted events.
-3. **Gate the GHCR push** via the docker-build action's `push` input (from `W2`). Untrusted events (`pull_request_target`, `dependabot[bot]`, external-fork PR) build the image but DO NOT push it to GHCR — building is sandboxed in the runner; publishing to the org/package namespace is what needs the trust gate. The full §5.5 trust-boundary `if:` clause that gates `deploy` + `integration-test` jobs lands with `W5b` in Deploy PR; this push gate is the build-PR-window slice of that same boundary, applied at the action input rather than the job `if:` so untrusted PRs still get Dockerfile-compiles signal.
+1. **Wire `MAVEN_PROFILE`** into the existing `java-build` job invocation. `W1` added the `maven_profile` input to the action; without this wiring step, every fork's CI continues to build all provider profiles (D5 / ADR-035 was never realized). Pass `${{ vars.MAVEN_PROFILE }}` — if the variable is unset (forks not yet onboarded), behavior is unchanged from today.
+2. **Append the `🐳 Docker Build` job** (validate-only) after `java-build`. Runs on **every event type** — every PR, including external-fork PRs and `pull_request_target`, gets the "your Dockerfile compiles" feedback. **No `packages: write` permission**, no GHCR login, no push. Calls W2's action with `push: 'false'`.
+3. **Append the `🐳 Docker Push` job** after `🐳 Docker Build`. Runs **only on trusted events** (the §5.5 trust clause). Has `packages: write`. Calls W2's action with `push: 'true'` — GHA layer cache makes this build mostly cache hits. Exports `image_repository` + `image_digest` as job outputs for W5b's deploy job in Deploy PR to consume.
 
-Per D12, no changes to `build.yml` — build.yml stays full-profile to preserve cross-provider breakage signal (see [Upstream PR scope](#upstream-pr-scope) for rationale).
+**Why two jobs.** Round 4 attempted to gate at the action's `push` input but kept `packages: write` on the same job that runs untrusted Dockerfile builds — a privilege-escalation surface even if push is honored. The two-job split removes the surface: untrusted code only ever runs in a job without `packages: write`. The cost is a second `docker buildx build` invocation on trusted events, but GHA layer cache means the second build is mostly cache hits (~10-20% extra runtime). Per D12, no changes to `build.yml` — build.yml stays full-profile to preserve cross-provider breakage signal.
 
 **Task:**
-Edit `.github/template-workflows/validate.yml` to (a) pass `maven_profile: ${{ vars.MAVEN_PROFILE }}` to the existing java-build action invocation, and (b) add one new job (`docker-build`) after `java-build` that passes a push-gate expression to the docker-build action.
+Edit `.github/template-workflows/validate.yml` to (a) pass `maven_profile: ${{ vars.MAVEN_PROFILE }}` to the existing java-build action invocation, (b) add the `🐳 Docker Build` validate-only job, (c) add the `🐳 Docker Push` trusted-only job that depends on it.
 
 **Files:**
 - `.github/template-workflows/validate.yml`
 
 **Acceptance criteria:**
+
+*Maven profile wiring:*
 - [ ] Existing `java-build` job invocation passes `maven_profile: ${{ vars.MAVEN_PROFILE }}` to the action. When the repo variable is unset, the action falls through to today's full-profile build (verified by W1's acceptance criteria)
-- [ ] One new job `docker-build` appended after `java-build`, gated on `needs.java-build.outputs.build_result == 'success'`
-- [ ] **Job `name:` field is exactly `🐳 Docker Build`** — character-for-character match with the required-check context in `W10`'s `default-branch.json`. Without exact alignment, branch protection leaves PRs permanently blocked on a check that never reports
-- [ ] Job calls `./.github/actions/docker-build` with the contract from `W2` and passes `jar_artifact_name` matching the artifact name `java-build` uploads. The docker-build action consumes the JAR artifact; **no second Maven invocation in validate.yml**
-- [ ] **`push:` input wired to the trust-clause expression**: the docker-build job passes the boolean below to the action's `push:` input. Exact form (this is the build-PR-window slice of the §5.5 boundary that W5b will fully express on `deploy`/`integration-test`):
-  ```yaml
-  with:
-    push: |
-      ${{
-        github.actor != 'dependabot[bot]' &&
-        github.event_name != 'pull_request_target' &&
-        (github.event_name != 'pull_request' ||
-         github.event.pull_request.head.repo.full_name == github.repository)
-      }}
-  ```
-  When this evaluates to `false` (untrusted PR / pull_request_target / dependabot), W2's action builds the image to validate the Dockerfile but skips the GHCR push and visibility flip, and emits an empty `image_digest`. When `true` (trusted push / internal PR / `workflow_dispatch`), the action pushes and tags as normal
-- [ ] Outputs `image_repository` and `image_digest` exposed at the job level. Downstream consumers (W5b's deploy job in Deploy PR) must tolerate empty `image_digest` — when the trust gate skipped push, there's nothing to deploy and the deploy job won't run anyway because W5b's `if:` clause excludes the same events. The contract: `image_digest != ''` ⇔ image was pushed
-- [ ] `permissions:` block on the docker-build job includes `packages: write` (required even for build-only because the action's GHCR login step still runs), `contents: read`
-- [ ] `code-validation` job unchanged; `java-build` job changed only by the new `maven_profile` input (no other behavior change)
-- [ ] **No changes to `build.yml`** — full-profile build preserved there for cross-provider signal
-- [ ] **Step summary on the docker-build job clearly states "pushed" vs. "build-only (push gated off)"** so PR reviewers can tell at a glance whether a GHCR artifact exists for this commit
-- [ ] **No §5.5 trust-boundary `if:` clause** on the job itself — the gate is on the action input, not the job's existence. That lands as a job-level `if:` with W5b for deploy + integration-test
 
-**Reference:** Design doc §5.4 + §5.5 + §9.5.A (Build PR scope) + Appendix A.1. Check-name contract: `W10` (#8). Action push input: `W2` (#3).
+*🐳 Docker Build (validate-only, every event):*
+- [ ] New job appended after `java-build`. **Job `name:` field is exactly `🐳 Docker Build`** — character-for-character match with the required-check context in `W10`'s `default-branch.json`
+- [ ] **`needs: [java-build]`**; gated on `needs.java-build.outputs.build_result == 'success'`. No `if:` trust-clause — runs on every event including `pull_request_target` and external-fork PRs
+- [ ] **`permissions: contents: read`** ONLY. **No `packages: write`** — this is the security boundary. The job runs untrusted Dockerfile content; granting `packages: write` here would be a privilege-escalation surface even though the action wouldn't use it
+- [ ] Calls `./.github/actions/docker-build` with `push: 'false'` (string literal). W2's action skips GHCR login entirely when `push == 'false'`, so the absent `packages: write` permission isn't even attempted
+- [ ] Passes `jar_artifact_name` matching the artifact `java-build` uploads
+- [ ] Outputs nothing meaningful to downstream jobs (validate-only — no digest, no image to deploy). The job exists to validate Dockerfile compiles and to be the required check forks can satisfy regardless of trust context
+- [ ] Step summary states "Dockerfile validated; no GHCR push (validate-only job)" so PR reviewers understand why no GHCR artifact exists
 
-**Out of scope:** `deploy` and `integration-test` jobs (`W5b`). The §5.5 trust-boundary `if:` clause on downstream jobs (`W5b`). `workflow_dispatch force_full_pipeline` (#19 / W5b). Branch-protection changes (`W10`). Modifying `build.yml` (full-profile stays).
-
----
-
-### W5b: Wire deploy + integration-test jobs into validate.yml
-
-**Slot:** `W5b` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W3`, `W4`, `W13`, `W5a` (merged) &nbsp;|&nbsp; **Ships in:** Deploy PR
-
-**Context:**
-Second half of the original `W5` slot, scoped to Deploy PR. Appends the `deploy` and `integration-test` jobs to `validate.yml` and, **critically, lands the §5.5 trust-boundary `if:` clause** that gates the chain. The `if:` clause moves up to the `docker-build` job (added by W5a) so the entire downstream chain inherits gating via `needs:` — when `docker-build` is excluded by the trust clause, `deploy` and `integration-test` don't run either. This prevents an attacker from triggering image builds on `pull_request_target` whose images would then sit unused in GHCR.
-
-**Task:**
-Edit `.github/template-workflows/validate.yml` to:
-1. **Modify `docker-build` job** (introduced by W5a) — add the combined §5.5 `if:` clause plus the W13 manual escape hatch
-2. **Append two new jobs** (`deploy`, `integration-test`) after `docker-build`, inheriting trust-boundary gating via `needs:`
-
-**Files:**
-- `.github/template-workflows/validate.yml`
-
-**Acceptance criteria:**
-- [ ] **Combined `if:` clause on `docker-build`** (modifies what W5a added): admits both the §5.5 trust-boundary cases AND the W13 manual escape hatch. Exact form:
+*🐳 Docker Push (trusted-only):*
+- [ ] New job appended after `🐳 Docker Build`. **Job `name:` is exactly `🐳 Docker Push`** (not in `W10`'s required-check list — runs only on trusted events, so cannot be a required check; satisfies branch protection by virtue of `🐳 Docker Build` already passing)
+- [ ] **`needs: [java-build, docker-build]`** (or whatever validate-job name resolves to via `id:`). Inherits the dependency chain
+- [ ] **`if:` clause expresses the §5.5 trust boundary plus W13's `force_full_pipeline` escape hatch** (this is the same clause W5b will put on deploy/integration-test):
   ```yaml
   if: |
     (
-      needs.check-initialization.outputs.initialized == 'true' &&
-      needs.check-repo-state.outputs.is_java_repo == 'true' &&
       needs.java-build.outputs.build_result == 'success' &&
       github.actor != 'dependabot[bot]' &&
       github.event_name != 'pull_request_target' &&
@@ -415,25 +384,70 @@ Edit `.github/template-workflows/validate.yml` to:
       inputs.force_full_pipeline == true
     )
   ```
-  Without the second clause, W13's `force_full_pipeline` input lands but the gated jobs still don't run on manual dispatch — defeating W13's purpose.
-- [ ] Two new jobs (`deploy`, `integration-test`) appended after `docker-build`, both with `needs:` referencing `docker-build` so they inherit the trust-boundary gating
-- [ ] **Exact `name:` field contract — required-check alignment with `W10`'s ruleset:**
-  - `deploy` job `name: 🚀 Deploy to spi-stack`
-  - `integration-test` job `name: 🧪 Integration Tests`
-  - Both must match `default-branch.json` required-check contexts character-for-character including emoji. Misalignment leaves PRs permanently blocked on a check that never reports
-- [ ] `deploy` job uses per-service concurrency group `spi-stack-${{ vars.SERVICE_NAME }}` (per-service, not cluster-wide — §5.2)
-- [ ] `deploy` consumes `image_repository` + `image_digest` from `docker-build` and composes `${repo}@${digest}` — **deploy is never passed a tag**
-- [ ] `deploy` outputs `previous_digest` (for manual restore per §8.9 — consumed by W14's `restore-deployment.yml`) and `deployed_digest` (for integration-test verification)
-- [ ] `integration-test` is passed `expected_digest: ${{ needs.deploy.outputs.deployed_digest }}` plus all service-level vars (`vars.ACCEPTANCE_TEST_DIR`, `vars.K8S_DEPLOYMENT_NAME`, `vars.K8S_CONTAINER_NAME`, `vars.ACCEPTANCE_TEST_SECRET_MAP`, `vars.ACCEPTANCE_TEST_DEPENDENCIES`)
-- [ ] **`workflow_dispatch` "force-full-pipeline" input wired in** (W13 declares it; W5b consumes it via the combined `if:` clause above) so an operator can manually run the full deploy/test stages on the current HEAD even when the triggering change is paths-ignored. Include a test plan: dispatch the workflow with `force_full_pipeline: true` and confirm `docker-build` / `deploy` / `integration-test` all run
-- [ ] `permissions:` on the new jobs includes `id-token: write`, `contents: read` (these live on the **job**, not inside composite actions)
-- [ ] `code-validation` job remains in parallel (unchanged)
+  (The W13 `force_full_pipeline` clause lands with W13 in Deploy PR — in Build PR's window the `||` clause is harmless since `inputs.force_full_pipeline` doesn't exist yet. W5b modifies this expression when W13 lands.)
+- [ ] **`permissions: contents: read, packages: write`** — only this job has registry write
+- [ ] Calls `./.github/actions/docker-build` with `push: 'true'`. Same `jar_artifact_name` as the validate job
+- [ ] **Job-level outputs export `image_repository` + `image_digest`** from the action's outputs, so W5b's deploy job in Deploy PR can consume `needs.docker-push.outputs.image_digest`
+- [ ] Step summary states "Image pushed: `<repo>@<digest>`" with the digest for at-a-glance audit
+
+*Other:*
+- [ ] `code-validation` job unchanged
+- [ ] **No changes to `build.yml`** — full-profile build preserved there for cross-provider signal
+- [ ] On a trusted PR: both jobs run; build cache makes the second build fast. On an untrusted PR / `pull_request_target` / dependabot: only `🐳 Docker Build` runs; `🐳 Docker Push` is skipped (visible as a skipped job in the Actions UI); the required check still passes
+
+**Reference:** Design doc §5.4 + §5.5 + §9.5.A + Appendix A.1. Check-name contract: `W10` (#8). Action push input + login-skip semantics: `W2` (#3). Downstream consumer of `docker-push.outputs`: `W5b` (#6).
+
+**Out of scope:** `deploy` and `integration-test` jobs (`W5b` — both `needs: [docker-push]`). `workflow_dispatch force_full_pipeline` declaration itself (#19 / W13). Branch-protection changes (`W10`). Modifying `build.yml`.
+
+---
+
+### W5b: Wire deploy + integration-test jobs into validate.yml
+
+**Slot:** `W5b` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `S` &nbsp;|&nbsp; **Blocked by:** `W3`, `W4`, `W13`, `W5a` (merged) &nbsp;|&nbsp; **Ships in:** Deploy PR
+
+**Context:**
+Second half of the original `W5` slot, scoped to Deploy PR. Appends the `deploy` and `integration-test` jobs to `validate.yml`. **Both `needs: [docker-push]`** — they consume `image_repository` + `image_digest` from W5a's trusted-only push job. The `docker-push` job already carries the §5.5 trust-boundary `if:` clause (introduced by W5a), so the downstream chain inherits gating naturally: when push is skipped on untrusted events, deploy and integration-test are also skipped. The `if:` clause on the new jobs is **redundant defense in depth** — they're explicitly trust-gated AND they `needs: [docker-push]` which is also trust-gated.
+
+**Task:**
+Edit `.github/template-workflows/validate.yml` to:
+1. **Append two new jobs** (`deploy`, `integration-test`) after `docker-push`, with `needs: [docker-push]`
+2. **Replicate the same §5.5 trust-boundary `if:` clause** on each as an explicit defense-in-depth guard, plus extend `docker-push`'s existing `if:` with the W13 `force_full_pipeline` escape-hatch clause now that W13 ships in this PR
+
+**Files:**
+- `.github/template-workflows/validate.yml`
+
+**Acceptance criteria:**
+
+*Extend docker-push's existing `if:` with W13 escape hatch (small modification):*
+- [ ] **Modify `docker-push` job's `if:` clause** (introduced by W5a) — append the W13 `workflow_dispatch` + `force_full_pipeline` clause as an `||` branch so operators can manually dispatch a full pipeline run on the current HEAD even when triggered by paths-ignored events. Final form (this is also the canonical clause for `deploy` and `integration-test` below):
+  ```yaml
+  if: |
+    (
+      needs.java-build.outputs.build_result == 'success' &&
+      github.actor != 'dependabot[bot]' &&
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    ) || (
+      github.event_name == 'workflow_dispatch' &&
+      inputs.force_full_pipeline == true
+    )
+  ```
+
+*Two new jobs after docker-push:*
+- [ ] **`deploy` job**: `needs: [java-build, docker-push]`. Same `if:` clause as above (defense in depth — also gated by docker-push's skip propagation). **Job `name: 🚀 Deploy to spi-stack`** — exact match with W10's required-check context. `permissions: id-token: write, contents: read`. Per-service concurrency group `spi-stack-${{ vars.SERVICE_NAME }}` (per-service, not cluster-wide — §5.2). Consumes `needs.docker-push.outputs.image_repository` + `needs.docker-push.outputs.image_digest` and composes `${repo}@${digest}` — **deploy is never passed a tag**. Outputs `previous_digest` (for manual restore per §8.9 — consumed by W14's `restore-deployment.yml`) and `deployed_digest` (for integration-test verification)
+- [ ] **`integration-test` job**: `needs: [deploy]`. Same `if:` clause as above. **Job `name: 🧪 Integration Tests`** — exact match with W10's required-check context. `permissions: id-token: write, contents: read`. Passed `expected_digest: ${{ needs.deploy.outputs.deployed_digest }}` plus all service-level vars (`vars.ACCEPTANCE_TEST_DIR`, `vars.K8S_DEPLOYMENT_NAME`, `vars.K8S_CONTAINER_NAME`, `vars.ACCEPTANCE_TEST_SECRET_MAP`, `vars.ACCEPTANCE_TEST_DEPENDENCIES`)
+- [ ] **Both new jobs carry exact `name:` matching W10's required-check contexts** character-for-character including emoji. Misalignment leaves PRs permanently blocked on a check that never reports
+
+*Other:*
+- [ ] **`workflow_dispatch` "force-full-pipeline" input is declared by W13** (#19) and consumed here via the `||` branch in the `if:` clauses. Test plan: dispatch with `force_full_pipeline: true` on a paths-ignored commit and confirm `docker-push` / `deploy` / `integration-test` all run
+- [ ] `code-validation`, `java-build`, `🐳 Docker Build` (validate-only from W5a), `🐳 Docker Push` (trusted-only from W5a) jobs unchanged except for the `if:` clause extension on `docker-push`
 - [ ] **No changes to `build.yml`**
-- [ ] **Hard-blocked from merging until Phase 0 step 4a (OIDC validation) is green** for at least the four event subjects we care about (main push, feature push, PR sync, tag push). Plus all blocking deps (`W3`, `W4`, `W13`, `W5a`) merged
+- [ ] **Hard-blocked from merging until Phase 0 step 4a (OIDC validation) is green** for at least branch + tag subjects on partition (PR-subject validation requires a throwaway PR per §9.1 step 4a). Plus all blocking deps (`W3`, `W4`, `W13`, `W5a`) merged
 
-**Reference:** Design doc §5.4–§5.5 + §9.5.B (Deploy PR scope) + Appendix A.1.
+**Reference:** Design doc §5.4–§5.5 + §9.5.B (Deploy PR scope) + Appendix A.1. Check-name contract: `W10` (#8). Upstream of digest: `W5a`'s `docker-push` job (#22).
 
-**Out of scope:** Modifying build.yml. Branch-protection changes (W10 second pass). The W13 `workflow_dispatch` plumbing itself (W5b references it; W13 implements the trigger).
+**Out of scope:** Modifying build.yml. Branch-protection changes (W10 second pass). The W13 `workflow_dispatch` input declaration (W13 implements; W5b consumes).
 
 ---
 
@@ -528,7 +542,7 @@ If any of these change (here or in `W5a`/`W5b`), all three must update in lockst
 - **Pass 1 merge** waits on `W5a` (#22) merged AND first green docker-build run on partition observed
 - **Pass 2 merge** waits on `W5b` (#6) merged AND first green deploy+integration-test run on partition observed
 
-**Per-fork activation — canonical JSON describes fully-onboarded state; `SETTINGS-APPLY` filters per-fork.** The canonical `default-branch.json` shipped by this issue lists **all three** required checks once Pass 2 lands (`🐳 Docker Build`, `🚀 Deploy to spi-stack`, `🧪 Integration Tests`). But forks that haven't completed cluster-side onboarding don't have `AZURE_CLIENT_ID` and can't run deploy/integration-test — applying the full canonical ruleset to such a fork blocks every PR on checks that can never report. The propagation layer (`SETTINGS-APPLY` #25) is responsible for **per-fork filtering**: before PUT-updating a fork's ruleset, it reads the fork's repo secrets and, if `AZURE_CLIENT_ID` is absent, strips `🚀 Deploy to spi-stack` and `🧪 Integration Tests` from the `required_status_checks` payload. When the operator runs `spi onboard` and `AZURE_CLIENT_ID` lands, the next `settings-apply` run reconciles back to the full check set. **W10's job here is to ship the canonical "fully-onboarded" JSON**; SETTINGS-APPLY's job is to make the per-fork application safe.
+**Per-fork activation — canonical JSON describes fully-onboarded state; `SETTINGS-APPLY` filters per-fork.** The canonical `default-branch.json` shipped by this issue lists **all three** required checks once Pass 2 lands (`🐳 Docker Build`, `🚀 Deploy to spi-stack`, `🧪 Integration Tests`). But a partially-onboarded fork can't actually pass deploy/integration-test — applying the full canonical ruleset would block every PR on checks that fail or never report. The propagation layer (`SETTINGS-APPLY` #25) is responsible for **per-fork filtering**: before PUT-updating a fork's ruleset, it probes the fork's **full readiness manifest** (secret `AZURE_CLIENT_ID` + variables `SERVICE_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`, `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`). If **any** are missing, it strips `🚀 Deploy to spi-stack` and `🧪 Integration Tests` from the `required_status_checks` payload. When all are present (after `spi onboard` writes the cluster-side handoff + operator sets the test-side variables), the next `settings-apply` run reconciles back to the full check set. **W10's job here is to ship the canonical "fully-onboarded" JSON**; SETTINGS-APPLY's job is to make the per-fork application safe across heterogeneous fork readiness states.
 
 **Acceptance criteria:**
 - [ ] **Pass 1:** `🐳 Docker Build` present in `default-branch.json` required checks; exact string match with `W5a`'s docker-build job `name:`. **Hold merge until W5a is green on partition** (per Sequencing above)
@@ -698,7 +712,11 @@ Five coordinated changes:
 1. **Make `setup-rulesets.sh` idempotent + relocate to durable path + per-fork filter for unmet prerequisites.**
    - Move `.github/local-actions/init-helpers/setup-rulesets.sh` → `.github/scripts/settings-apply/setup-rulesets.sh`.
    - Update the script logic: probe for an existing ruleset by name via `GET /repos/{owner}/{repo}/rulesets`; if present, `PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}` to replace; if absent, keep today's `POST` create path. Add a `--dry-run` mode that prints the planned changes without applying.
-   - **Per-fork required-check filtering.** Before submitting the ruleset payload, probe the fork for prerequisites and strip checks whose prerequisites are unmet. Today: if `AZURE_CLIENT_ID` is absent on the fork (probed via `gh secret list | grep -q AZURE_CLIENT_ID`), strip `🚀 Deploy to spi-stack` and `🧪 Integration Tests` from `parameters.required_status_checks`. `🐳 Docker Build` is always retained. Log the filter decision to step summary so operators can see *why* deploy/test checks aren't enforced yet. When `spi onboard` later writes `AZURE_CLIENT_ID`, the next run sees it present and re-PUT-updates the ruleset with the full canonical check set. This is what makes W10's "canonical fully-onboarded JSON" + per-fork heterogeneity safe.
+   - **Per-fork required-check filtering — full readiness manifest, not single secret.** Before submitting the ruleset payload, probe the fork for **all** deploy-side prerequisites and strip deploy/test checks if **any** are missing. A fork with `AZURE_CLIENT_ID` but no `K8S_DEPLOYMENT_NAME` can't actually deploy successfully, so activating the deploy required-check would block PRs on a check that always fails. The filter predicate is: deploy + integration-test checks are activated **only when ALL** of the following are present on the fork:
+     - **Secrets** (via `gh secret list --json name --jq '.[].name'`): `AZURE_CLIENT_ID`
+     - **Variables** (via `gh variable list --json name --jq '.[].name'`): `SERVICE_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`, `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`
+
+     If any are missing, strip `🚀 Deploy to spi-stack` and `🧪 Integration Tests` from `parameters.required_status_checks`; `🐳 Docker Build` is always retained. Log the missing items to step summary so operators see exactly what's blocking activation. When the next `settings-apply.yml` run finds all present, the ruleset is restored to the full canonical check set. This is what makes W10's "canonical fully-onboarded JSON" + per-fork heterogeneity safe.
    - Update `.github/workflows/init-complete.yml`'s `Setup Repository Rulesets` step (around lines 342-348) to call the script from its new location. The temp-location preservation pattern (lines 290-302) becomes unnecessary for this script — it's now durable in `.github/scripts/settings-apply/`, which is not in `cleanup_rules`.
 
 2. **Add new helper scripts at the durable path.**
@@ -742,7 +760,15 @@ Five coordinated changes:
 
 **Acceptance criteria:**
 - [ ] `setup-rulesets.sh` is idempotent: on a fork where `Default Branch Protection` already exists, re-running the script with an updated `default-branch.json` results in PUT to the existing ruleset id; on a fork without rulesets, behaviour is unchanged from today (POST creates). Same for `Integration Branch Protection`. Action plan per ruleset (create / update / no-change) logged to step summary
-- [ ] **Per-fork required-check filter**: before PUT/POST, the script probes whether `AZURE_CLIENT_ID` is set on the fork (`gh secret list --json name --jq '.[].name' | grep -q '^AZURE_CLIENT_ID$'`). If absent, the script strips `🚀 Deploy to spi-stack` and `🧪 Integration Tests` from `parameters.required_status_checks` before submitting; `🐳 Docker Build` is always retained. The filter decision is logged: `"AZURE_CLIENT_ID absent — deploy + integration-test checks NOT enforced on this fork; run spi onboard then re-dispatch settings-apply.yml to enable"`. When `AZURE_CLIENT_ID` is later set and the workflow re-runs, the unfiltered canonical ruleset is restored
+- [ ] **Per-fork required-check filter (full readiness manifest)**: before PUT/POST, the script probes whether **ALL** deploy-side prerequisites are present on the fork. The full manifest is: secret `AZURE_CLIENT_ID` AND variables `SERVICE_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`, `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`. The probe pattern:
+  ```bash
+  missing=()
+  gh secret list --json name --jq '.[].name' | grep -q '^AZURE_CLIENT_ID$' || missing+=("secret:AZURE_CLIENT_ID")
+  for v in SERVICE_NAME MAVEN_PROFILE ACCEPTANCE_TEST_DIR ACCEPTANCE_TEST_SECRET_MAP ACCEPTANCE_TEST_DEPENDENCIES K8S_DEPLOYMENT_NAME K8S_CONTAINER_NAME; do
+    gh variable list --json name --jq '.[].name' | grep -q "^$v\$" || missing+=("variable:$v")
+  done
+  ```
+  If `missing` is non-empty, strip `🚀 Deploy to spi-stack` and `🧪 Integration Tests` from `parameters.required_status_checks` before submitting; `🐳 Docker Build` is always retained. The filter decision is logged to step summary listing every missing item: `"Deploy/test required-checks NOT enforced on this fork; missing prerequisites: <list>. Resolve via spi onboard (cluster-side) + gh variable set (operator-side), then re-dispatch settings-apply.yml."`. When all prerequisites are later set and the workflow re-runs, the unfiltered canonical ruleset is restored
 - [ ] `setup-rulesets.sh --dry-run` prints the planned actions per ruleset, **including the filter decision** (which checks would be retained vs stripped), without calling the mutating API
 - [ ] `setup-rulesets.sh` is at `.github/scripts/settings-apply/setup-rulesets.sh`. The old `.github/local-actions/init-helpers/setup-rulesets.sh` is deleted. `init-complete.yml`'s `Setup Repository Rulesets` step is updated to call the new path; the script no longer appears in the temp-location preservation block at lines 290-302
 - [ ] **`settings-apply.yml`'s `paths:` filter** matches the relocated layout exactly: `['.github/rulesets/**', '.github/scripts/settings-apply/**']` — covers both ruleset JSON changes and helper-script changes
