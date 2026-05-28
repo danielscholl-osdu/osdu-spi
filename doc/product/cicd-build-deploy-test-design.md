@@ -96,17 +96,17 @@ Without these signals, the only way to discover deployment regressions is at rel
 
 - **G1.** Every push/PR that runs build/validate today also produces a Docker image and deploys it to the shared cluster for integration testing.
 - **G2.** Integration test failures block the PR (treated as a required check).
-- **G3.** The mechanism is identical across all 8 services — partition is the reference implementation, the other 7 inherit via template-sync.
+- **G3.** The mechanism is identical across the current `danielscholl-osdu` service-fork inventory — `partition`, `entitlements`, `legal`, `schema`, `file`, `storage`, `indexer`, `indexer-queue`, `search`, and `workflow` — with all forks inheriting via template-sync.
 - **G4.** Workflows live in `osdu-spi/template-workflows/` (engineering system owns the recipe).
 - **G5.** Per-fork runtime is independent — no fork modifies the stack repo or another fork's state.
-- **G6.** Bringing a service repo onto a `spi-stack` cluster is two operator actions split along the credential boundary: (a) **GitHub-side** — "Use this template" on `osdu-spi` plus the existing `init.yml`, extended to handle GHCR visibility, the new required checks, and per-service variables; (b) **Cluster-side** — `spi onboard --service <name> --repo <org/repo>` in `osdu-spi-stack` grants the repo permission to deploy into the cluster (managed identity + federated creds + AKS/KV RBAC + RoleBinding) and writes the three `AZURE_*` handoff secrets onto the repo. Neither side owns the other's resources. See §9.4.
+- **G6.** Bringing a service repo onto a `spi-stack` cluster is split along the credential boundary: (a) **GitHub-side** — fresh forks use "Use this template" plus `init.yml`; current initialized forks use `settings-apply.yml` for GHCR visibility, required-check filtering, and per-service variable reconciliation; (b) **Cluster-side** — `spi onboard --service <name> --repo <org/repo>` in `osdu-spi-stack` grants the repo permission to deploy into the cluster (managed identity + federated creds + AKS/KV RBAC + RoleBinding) and writes the three `AZURE_*` handoff secrets onto the repo. Neither side owns the other's resources. See §9.4.
 
 ### 2.2 Constraints (locked by user)
 
 - **C1.** New stages run on the same cadence as today's per-PR validation (PR events + push to `main`/`fork_integration`/`fork_upstream`). They are appended jobs in `template-workflows/validate.yml` **only**. `template-workflows/build.yml` keeps its Maven-build-only signal for feature-branch pushes — adding deploy stages there would cause duplicate `kubectl set image` calls to race on the same shared `Deployment` whenever both workflows fire on a PR sync event (see D12).
 - **C2.** Container registry: **GHCR**, fork-owned. Packages must be **public** (decided by user) so AKS can pull without per-fork image-pull-secrets. Public visibility must be confirmed acceptable under the publishing org's container-registry policy **before Phase 4**; the design's fallback if public is disallowed is documented in §7.4.
 - **C3.** Maven build restricted to **`-P partition-azure`** (or the Azure-equivalent profile for each service). Other cloud provider profiles are not built. Faster validate, smaller blast radius.
-- **C4.** Deploy target: **single shared `osdu-spi-stack` AKS environment**. Already running. Flux is **permanently suspended** as a steady state — not just "during CI" — because there is no per-service "CI mode" toggle for a shared cluster. Resuming Flux is a planned-outage operation requiring a CI freeze across all 8 forks (see §7.5, §8.2).
+- **C4.** Deploy target: **single shared `osdu-spi-stack` AKS environment**. Already running. Flux is **permanently suspended** as a steady state — not just "during CI" — because there is no per-service "CI mode" toggle for a shared cluster. Resuming Flux is a planned-outage operation requiring a CI freeze across the current service forks (see §7.5, §8.2).
 - **C5.** Deploy mechanism: **`kubectl set image`** directly on existing Deployments. No Helm from CI, no HelmRelease editing — Flux is suspended, deployments live untouched. Requires the Helm chart in `osdu-spi-stack` to materialize each service's `Deployment` with a stable, predictable resource name and container name. These names are exposed as **per-service GitHub repo variables** (`K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`) rather than derived from `SERVICE_NAME`, to insulate CI from chart-naming changes (see D13).
 - **C6.** Fork is independent at runtime: no cross-repo commits, no PRs to `osdu-spi-stack` from a service fork. Forks do **share** infrastructure (cluster, gateway URL, Key Vault), so a shared-infrastructure change (gateway DNS, KV rename) is a coordinated update across all forks.
 - **C7.** Implementation must be proven in a sandbox fork of the engineering system before any change lands in `Azure/osdu-spi`.
@@ -310,7 +310,7 @@ Callers MUST compose the deploy reference as `${image_repository}@${image_digest
 - JAR artifact missing (java-build skipped or failed) → job is skipped (`needs: java-build`)
 - GHCR push fails (rate limit, network) → job fails, retried by re-running workflow
 - Image too large (>1GB) → warning surfaced, not blocking initially
-- First-time push creates a new GHCR package as **private by default** — the fork's `init.yml` (Phase 3 §9.4.B) flips visibility to public via `gh api -X PATCH .../visibility`. Until that runs once per service, deploys will fail with `ErrImagePull`.
+- First-time push creates a new GHCR package as **private by default** — the W2 `docker-build` push path attempts an immediate public-visibility flip, fresh-fork `init.yml` also reconciles visibility during initialization, and existing forks continue reconciling via `settings-apply.yml`. Until one of those visibility paths succeeds for the service package, deploys will fail with `ErrImagePull`.
 
 ### 5.2 Deploy
 
@@ -492,7 +492,7 @@ integration-test       (NEW — digest verification, cross-service health probe)
 
 ### 5.5 Workflow trust boundaries
 
-The new jobs hold a federated identity with `Azure Kubernetes Service Cluster User Role` + namespace `edit` + `Key Vault Secrets User`. Running them on attacker-controlled code is a path to cluster-wide compromise across all 8 forks. The trust model:
+The new jobs hold a federated identity with `Azure Kubernetes Service Cluster User Role` + namespace `edit` + `Key Vault Secrets User`. Running them on attacker-controlled code is a path to cluster-wide compromise across the current service forks. The trust model:
 
 | Event | Code source | Secret access | Deploy stages run? |
 |---|---|---|---|
@@ -799,7 +799,7 @@ If at any point a service's GHCR package gets accidentally made private, AKS pul
 > - **Org-owned package** (this design's default; `danielscholl-osdu/<service>` pushes to `ghcr.io/danielscholl-osdu/<service>`): `/orgs/{ORG}/packages/container/{SERVICE}/visibility`
 > - **User-owned package** (only if the publishing repo is under a personal account): `/user/packages/container/{SERVICE}/visibility` (writes to *your own* packages) or `/users/{USER}/packages/container/{SERVICE}` (reads someone else's)
 >
-> The fork's `init.yml` and the W12 CI verification must pick the right one based on whether `${{ github.repository_owner }}` is an org or a user. `gh api /users/{owner}` returns `"type": "Organization"` vs `"User"` — that's the discriminator.
+> The fork-side visibility helpers and the W2 post-push visibility check must pick the right one based on whether `${{ github.repository_owner }}` is an org or a user. `gh api /users/{owner}` returns `"type": "Organization"` vs `"User"` — that's the discriminator.
 
 ```bash
 # Read visibility (org-owned package — the design's default)
@@ -847,7 +847,7 @@ When the cluster is in CI mode (its normal state):
 - CI workflows can `kubectl set image` freely
 - `helm` and `flux` CLI users must not manually reconcile or resume
 
-**Baseline refresh procedure** (planned-outage; coordinate across all 8 forks):
+**Baseline refresh procedure** (planned-outage; coordinate across the current service forks):
 
 1. Announce a CI freeze window in the engineering org (e.g., a pinned issue or org-level workflow that pauses cascade and template-sync).
 2. Verify no in-flight workflow runs are mid-deploy (`gh run list --status in_progress` across forks).
@@ -870,7 +870,7 @@ The stack repo should expose this as a single `spi cluster baseline-refresh` sub
 
 ### 8.1 Concurrency between services
 
-All 8 services share the `osdu` namespace. If `partition` and `entitlements` deploys race, the cluster sees:
+All current service forks share the `osdu` namespace. If `partition` and `entitlements` deploys race, the cluster sees:
 
 ```
 T0: partition CI starts, target deploy/partition
@@ -891,7 +891,7 @@ This allows two services to deploy in parallel (different deployments) but two P
 
 ### 8.2 Cluster cleanup / drift
 
-After many CI runs the cluster has drifted from Flux's declared state. The reset procedure is the **baseline refresh** documented in §7.5 — it is a planned outage that requires a CI freeze across all 8 forks, not a casual cron.
+After many CI runs the cluster has drifted from Flux's declared state. The reset procedure is the **baseline refresh** documented in §7.5 — it is a planned outage that requires a CI freeze across the current service forks, not a casual cron.
 
 Frequency depends on how much drift accumulates. Initial target: monthly during the rollout phase, quarterly thereafter unless investigating a specific symptom.
 
@@ -977,7 +977,7 @@ This guarantees the integration-test step can re-verify the running pod's image 
 
 ### 8.8 Cross-service test data isolation
 
-The shared `osdu` namespace + concurrent CI runs across 8 services means acceptance tests will trip over each other unless they:
+The shared `osdu` namespace + concurrent CI runs across service forks means acceptance tests will trip over each other unless they:
 
 - Create test data with a **per-run unique prefix** — e.g., partition tenant IDs derived from `${SHORT_SHA}-${RUN_ID}`, not hard-coded `test-001`
 - Clean up after themselves on success (best-effort on failure — failure cleanup is unreliable, so naming must be unique enough that residue is harmless)
@@ -1218,7 +1218,7 @@ What it does, in order (each step is idempotent):
 6. Create K8s RoleBinding in `osdu` namespace using the auth-mode-appropriate form (§6.1 step 3) — `kubectl apply` of a generated manifest, so reruns are safe.
 7. Assign Key Vault Secrets User role (scoped per-service if KV access policy is in use).
 8. Write the three Azure handoff secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) to the target repo via `gh secret set`. Write the captured Deployment/container names as repo variables (`K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`).
-9. Output a JSON summary block: identity object ID, secrets written, variables emitted, KV secret names the operator still needs to populate out of band (§11 Q2), and a reminder to re-dispatch `init.yml` on the target fork so it can complete its GHCR + ruleset steps.
+9. Output a JSON summary block: identity object ID, secrets written, variables emitted, KV secret names the operator still needs to populate out of band (§11 Q2), and a reminder to run `settings-apply.yml` on the target fork (or wait for its schedule) so repo-side reconciliation can apply rulesets, required-check filtering, GHCR visibility, and any `human-required` issue updates.
 
 **Exit criteria:**
 - Re-running `spi onboard` against the same `--repo` is idempotent (no duplicate role assignments, no secret overwrites unless `--force-rewrite-secrets`).
@@ -1234,7 +1234,7 @@ What it does, in order (each step is idempotent):
 
 **Lands in:** `osdu-spi` (this repo) &nbsp;|&nbsp; **Effort:** S (split: `ONBOARD-INIT-A` ships in Build PR, `ONBOARD-INIT-B` in Deploy PR)
 
-**Scope.** `init.yml` runs **once** on a fresh fork (template create) and the existing `deploy-fork-resources.sh` deletes the init helpers and `.github/local-actions/` afterwards. There is **no path to re-dispatch `init.yml`** on a fork once initialization completes. Therefore `ONBOARD-INIT-A`/`ONBOARD-INIT-B` are **fresh-fork only** — they read operator-supplied values from `init.yml` inputs, write them to the repo, and let `deploy-fork-resources.sh` clean up. Existing service forks (entitlements, legal, schema, storage, search, indexer, file — already initialized before this CI/CD work) take the **`SETTINGS-APPLY` path** (§9.4.D) for ongoing reconciliation and for first-time CI/CD bootstrap.
+**Scope.** `init.yml` runs **once** on a fresh fork (template create) and the existing `deploy-fork-resources.sh` deletes the init helpers and `.github/local-actions/` afterwards. There is **no path to re-dispatch `init.yml`** on a fork once initialization completes. Therefore `ONBOARD-INIT-A`/`ONBOARD-INIT-B` are **fresh-fork only** — they read operator-supplied values from `init.yml` inputs, write them to the repo, and let `deploy-fork-resources.sh` clean up. Current service forks (`partition`, `entitlements`, `legal`, `schema`, `file`, `storage`, `indexer`, `indexer-queue`, `search`, `workflow`) have already been initialized from this fork and are running, so they take the **`SETTINGS-APPLY` path** (§9.4.D) for ongoing reconciliation and for first-time CI/CD bootstrap.
 
 The existing template-fork bootstrap (`Use this template` → `init.yml` → init-helpers under `.github/local-actions/init-helpers/`) already configures branches, rulesets, security, sync, and labels. The fork-side onboarding extension covers:
 
@@ -1281,7 +1281,7 @@ Each side is one command. The split tracks the credential boundary, not artifici
 
 **Lands in:** `osdu-spi` (this repo) &nbsp;|&nbsp; **Effort:** M
 
-The seven service forks (entitlements, legal, schema, storage, search, indexer, file) were initialized **before** this CI/CD work. `init.yml`'s helpers were deleted from them, so the `ONBOARD-INIT-A`/`-B` fresh-fork helpers cannot run there. Ruleset updates also don't reach them: `sync.yml` brings file changes into forks via PR, but it does **not** call any GitHub Settings/Rulesets API, and the existing `setup-rulesets.sh` is POST-only (errors HTTP 422 when a ruleset with the same name already exists).
+The current service forks (`partition`, `entitlements`, `legal`, `schema`, `file`, `storage`, `indexer`, `indexer-queue`, `search`, `workflow`) have already been initialized from this fork and are running. `init.yml`'s helpers were deleted from them, so the `ONBOARD-INIT-A`/`-B` fresh-fork helpers cannot run there. Ruleset updates also don't reach them: `sync.yml` brings file changes into forks via PR, but it does **not** call any GitHub Settings/Rulesets API, and the existing `setup-rulesets.sh` is POST-only (errors HTTP 422 when a ruleset with the same name already exists).
 
 **`SETTINGS-APPLY`** closes all gaps:
 
@@ -1426,7 +1426,7 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
    - Sandbox proof points: 10+ deploy-green runs on partition (full pipeline; integration-test required green)
    - `spi onboard` (in `osdu-spi-stack`) merged and validated against at least one service fork end-to-end
    - All five Phase 0 gates closed (0a, 0b, 0d, 0e, 0f); Phase 0 step 4a OIDC validation green on main push / feature push / PR sync / tag push subjects
-   - Existing service forks notified that they'll need to run `spi onboard` from `osdu-spi-stack` and re-dispatch `init.yml` before the new required checks start blocking merges
+   - Existing service forks notified that they'll need to run `spi onboard` from `osdu-spi-stack`, populate any operator-owned variables surfaced by `settings-apply.yml`, and re-run `settings-apply.yml` before deploy/integration-test checks are enforced
 
 4. **Merge sequence (Deploy PR):**
    - ADR-032, ADR-034, ADR-036 first (documentation)
@@ -1446,16 +1446,18 @@ The sandbox (`danielscholl-osdu/osdu-spi`) is **kept long-lived** rather than ar
 
 `danielscholl-osdu/partition`'s `TEMPLATE_REPO_URL` is **switched back to `Azure/osdu-spi`** after the Deploy PR merges. The sandbox keeps tracking upstream but no longer feeds partition. To use the sandbox again later (for another template change), the variable can be re-pointed.
 
-### 9.6 Phase 5 — Rollout to Remaining Services
+### 9.6 Phase 5 — Rollout to Initialized Service Forks
 
-**Effort:** M total — each service is S (initialize + onboard + per-service audit + first CI run); 7 services, parallelizable across operators
-**Goal:** All 8 services on the new CI loop.
+**Effort:** M total — each service fork is S (onboard + per-service audit + first CI run); 10 initialized forks, parallelizable across operators
+**Goal:** All current service forks on the new CI loop.
 
-**Entry condition:** Phase 5 starts when **Phase 4a (Build PR) merges upstream**, not when both PRs land. Each new service fork can be initialized and the build-only half of the pipeline becomes a required check immediately (Build PR ruleset). The deploy + integration-test half of each service goes live per-fork after Phase 4b merges *and* the operator has run `spi onboard` + re-dispatched `init.yml` so `ONBOARD-INIT-B` populates `AZURE_*` and the remaining per-service variables. Forks that haven't completed cluster-side onboarding when the Deploy PR lands continue to ship green builds; their deploy/integration-test checks remain pending until they onboard.
+**Entry condition:** Phase 5 starts when **Phase 4a (Build PR) merges upstream**, not when both PRs land. Build-only capability propagates to existing forks via template-sync plus `settings-apply.yml`; future fresh forks get the same state via `init.yml`. The deploy + integration-test half of each service goes live per-fork after Phase 4b merges, `spi onboard` writes the `AZURE_*` handoff plus `K8S_*` variables, operator-owned acceptance-test variables are populated, and `settings-apply.yml` reconciles the full required-check set. Forks that haven't completed cluster-side onboarding when the Deploy PR lands continue to ship green builds; their deploy/integration-test checks remain filtered out until they onboard.
 
-**Order (by dependency, not alphabet — so each newly-onboarded service has its acceptance-test dependencies already running):**
+**Current rollout inventory:** `partition`, `entitlements`, `legal`, `schema`, `file`, `storage`, `indexer`, `indexer-queue`, `search`, `workflow`.
 
-1. Partition (done — reference; required by all others)
+Process forks in dependency order, not alphabet, so each newly-onboarded service finds its acceptance-test dependencies already running. The per-service audit finalizes the exact placement for `indexer-queue` and `workflow`; the known dependency backbone is:
+
+1. Partition (reference; required by all others)
 2. Entitlements (depends on partition)
 3. Legal (depends on partition)
 4. Schema (depends on partition + entitlements)
@@ -1468,7 +1470,7 @@ Indexer and Search are coupled for event-driven indexing — both can deploy ind
 
 **Per service — two flows depending on initialization state:**
 
-*Flow A — Existing forks (entitlements, legal, schema, storage, search, indexer, file).* These were initialized before this CI/CD work; `init.yml` is no longer available. Onboarding goes through `SETTINGS-APPLY`:
+*Flow A — Existing forks (`partition`, `entitlements`, `legal`, `schema`, `file`, `storage`, `indexer`, `indexer-queue`, `search`, `workflow`).* These have already been initialized from this fork and are running; `init.yml` is no longer available. Onboarding goes through `SETTINGS-APPLY`:
 
 - **Per-service audit** (one-time): capture `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`, test data isolation strategy (§8.8). Document in `doc/product/service-onboarding-<service>.md`.
 - Run cluster-side onboarding from a workstation: `uv run spi onboard --service <name> --repo <org>/<name> ...` writes `AZURE_*` + `K8S_*` (Phase 3 Deliverable A / §9.4.A).
@@ -1478,7 +1480,7 @@ Indexer and Search are coupled for event-driven indexing — both can deploy ind
 - Verify first CI run on the fork's main goes green.
 - Update §8.8 isolation status table.
 
-*Flow B — Fresh forks (any new service started after this work lands; partition started as Flow B in the sandbox).* `init.yml` is still in the fork:
+*Flow B — Future fresh forks (any new service started after this work lands).* `init.yml` is still in the fork:
 
 - "Use this template" → on `init.yml`'s workflow_dispatch UI, supply the per-service variables (`SERVICE_NAME`, `MAVEN_PROFILE`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `ACCEPTANCE_TEST_DEPENDENCIES`). `ONBOARD-INIT-A`/`-B` runs them at init time; rulesets POST via `setup-rulesets.sh`.
 - Run cluster-side onboarding from a workstation (same `spi onboard` command as Flow A).
@@ -1489,7 +1491,7 @@ Indexer and Search are coupled for event-driven indexing — both can deploy ind
 Both flows converge on the same steady state: every fork has the up-to-date rulesets, all required variables/secrets, and `settings-apply.yml` for ongoing drift correction.
 
 **Exit criteria:**
-- All 8 services have green CI loops on a representative event (PR open + merge to main)
+- All current service forks have green CI loops on a representative event (PR open + merge to main)
 - Onboarding script needed no per-service patches (proves generality)
 - §8.8 audit table fully populated
 - Each fork's `Deployment` was found and patched successfully — confirming the chart-name convention holds across services
@@ -1504,7 +1506,7 @@ Both flows converge on the same steady state: every fork has the up-to-date rule
 | Phase 3 — Onboarding split: cluster-side `spi onboard` (M, cross-repo) + fork-side `init.yml` extension (S, this repo) | **M+S** | Two halves along the credential boundary — see §9.4 |
 | Phase 4a — Build PR (Build to GHCR) | **S** | Coordination + diff + ADR renumbering; no Phase 0 blockers for sandbox work (Gate 0c resolved); upstream review may surface MCR per §7.4 *"Migration-swap scope"* |
 | Phase 4b — Deploy PR (Deploy + Integration Test) | **S** | Coordination + diff; gated by Phase 0 0a/0b/0d/0e/0f + step 4a |
-| Phase 5 — Per-service rollout | **M** | Each service is S; 7 services, parallelizable across operators |
+| Phase 5 — Per-service rollout | **M** | Each service fork is S; 10 current forks, parallelizable across operators |
 
 T-shirt sizes describe **effort scale**, not wall-clock time. Real elapsed time depends on operator count, review cycles, and how many gate answers from Phase 0 trigger Phase 2 revisions. See the implementation plan for per-sub-issue sizing.
 
@@ -1516,7 +1518,7 @@ T-shirt sizes describe **effort scale**, not wall-clock time. Real elapsed time 
 |---|------|-----------|--------|-----------|
 | R1 | Flux is accidentally resumed mid-CI, reverting deployed image | M | H | Pre-flight assertion in deploy action (§5.2); post-rollout digest verification at start of integration-test (§5.3); §7.5 codifies Flux suspension as permanent invariant, baseline refresh is planned-outage only |
 | R2 | Cross-service test flakes due to shared namespace | H | M | Per-service concurrency lock first; escalate to cluster-wide for services that can't meet §8.8 isolation discipline |
-| R3 | GHCR package accidentally goes private, AKS pulls fail | L | H | W12 in-workflow visibility check; fork `init.yml` (Phase 3 §9.4.B) sets/restores public on re-dispatch |
+| R3 | GHCR package accidentally goes private, AKS pulls fail | L | H | W2 post-push visibility flip; fresh-fork `init.yml` sets visibility during initialization; existing forks keep reconciling visibility through scheduled/manual `settings-apply.yml` |
 | R4 | Federated credential subject claim mismatch (branch ref edge cases, tags) | M | M | Wildcard `refs/heads/*` and `refs/tags/*` subjects; explicit `pull_request` subject; Phase 0 step 4a validates every event type before W3 |
 | R5 | Acceptance tests depend on stale data from previous run | M | M | Per-run unique prefixes (§8.8); planned baseline refresh (§8.2) when drift accumulates; tests should be idempotent |
 | R6 | Cluster outage blocks all PR merges | L | H | Cluster-health-check pre-flight (W8) emits clear "cluster down" error; ops can flip a repo variable to make integration-test advisory during a known outage |
@@ -1972,7 +1974,7 @@ Note the `cluster_state` output drives a PR label downstream (see §5.3 exit-cod
 
 **ADR-036: Workflow Trust Boundaries for CI/CD with Cluster Credentials**
 
-> **Context:** The new `docker-push` / `deploy` / `integration-test` jobs hold credentials with real blast radius — `docker-push` has `packages: write` on GHCR; `deploy` and `integration-test` hold a federated identity with `Azure Kubernetes Service Cluster User`, a least-privilege custom Role on the shared `osdu` namespace, and `Key Vault Secrets User`. (The validate-only `docker-build` job runs on every event with `permissions: contents: read` only — no `packages: write`, no Azure login — and is therefore exempt from this trust boundary.) The default GitHub Actions trigger surface (especially `pull_request_target`, but also dependabot PRs and external-fork PRs) can place attacker-controlled code in a context that has access to repo secrets. Running the credential-bearing jobs in those contexts would expose the cluster federated identity to attacker code, risking compromise across all 8 forks.
+> **Context:** The new `docker-push` / `deploy` / `integration-test` jobs hold credentials with real blast radius — `docker-push` has `packages: write` on GHCR; `deploy` and `integration-test` hold a federated identity with `Azure Kubernetes Service Cluster User`, a least-privilege custom Role on the shared `osdu` namespace, and `Key Vault Secrets User`. (The validate-only `docker-build` job runs on every event with `permissions: contents: read` only — no `packages: write`, no Azure login — and is therefore exempt from this trust boundary.) The default GitHub Actions trigger surface (especially `pull_request_target`, but also dependabot PRs and external-fork PRs) can place attacker-controlled code in a context that has access to repo secrets. Running the credential-bearing jobs in those contexts would expose the cluster federated identity to attacker code, risking compromise across the current service forks.
 > **Decision:** The new jobs run only when **all** of the following hold:
 > - Event is `push` to a protected branch, OR `pull_request` from a head repo equal to the base repo, OR `workflow_dispatch`, OR a tag push.
 > - Actor is not `dependabot[bot]` (dependabot-validation.yml is the dependency-update path; dependabot does not need cluster access).
@@ -2005,11 +2007,11 @@ Pre-Phase 1:
 
 Pre-Phase 4:
 
-- [ ] All Phase 2 work items (W1–W12) merged to sandbox
+- [ ] All Phase 2 work items in §9.3 merged to sandbox
 - [ ] Partition CI on sandbox is green for 10+ **substantive** runs (per §9.3 phase exit criteria)
 - [ ] `doc/product/cicd-poc-notes.md` captures resolutions to every gotcha
 - [ ] Cluster-side onboarding (`spi onboard`, §9.4.A) tested re-running on partition (idempotent)
-- [ ] Fork-side onboarding (extended `init.yml`, §9.4.B) tested by re-dispatching on partition after `spi onboard` runs — GHCR public, retention set, ruleset updated, per-service vars present
+- [ ] Fork-side onboarding/reconciliation tested on partition after `spi onboard` runs — `settings-apply.yml` reconciles rulesets and GHCR visibility, required per-service vars are present, and the W11 retention workflow is installed
 - [ ] ADR numbers re-checked vs. upstream `Azure/osdu-spi`
 - [ ] Upstream review posture confirmed: Build PR description cites Azure-org public-GHCR precedent (§7.4); if Azure-org review pivots to MCR or private-GHCR fallback, the migration-swap path is documented and ready to execute (§7.4 *"Migration-swap scope"*)
 

@@ -681,7 +681,7 @@ Implement `spi onboard --service <name> --repo <org/repo> --aks-cluster <cluster
 - [ ] Writes the three handoff secrets to the target repo via `gh secret set`: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
 - [ ] Writes the captured cluster-side repo variables via `gh variable set`: `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`
 - [ ] `--dry-run` mode prints the plan without making changes
-- [ ] Outputs a JSON summary on completion: identity object ID, secrets written, variables emitted, KV secret names operator still needs to populate, **a reminder to re-dispatch `init.yml` on the target fork so `ONBOARD-INIT` can complete the fork-side work (GHCR + ruleset + per-service vars)**
+- [ ] Outputs a JSON summary on completion: identity object ID, secrets written, variables emitted, KV secret names operator still needs to populate, **a reminder to run `settings-apply.yml` on the target fork (or wait for its schedule) so repo-side reconciliation can apply rulesets, required-check filtering, GHCR visibility, and any `human-required` issue updates**
 - [ ] **Hard-blocked from production use until Phase 0 gates 0b (AKS auth mode) and 0f (operator RBAC) are closed.** Scaffolding the CLI command is fine; running it against a fork requires those answers
 
 **Out of scope (handled by `ONBOARD-INIT` in `osdu-spi`):**
@@ -702,7 +702,7 @@ Implement `spi onboard --service <name> --repo <org/repo> --aks-cluster <cluster
 
 **Three deliverables in `osdu-spi-stack`** (each can be its own sub-issue there, or one combined issue — operator's call):
 
-1. **`spi cluster baseline-refresh` subcommand** (design §8.4). Coordinated rebase to the HelmRelease baseline across all 8 forks: (a) announce CI freeze, (b) verify no in-flight workflow runs across forks (`gh run list --status in_progress`), (c) `flux resume kustomization --all -n flux-system` and wait for convergence, (d) `flux suspend` to return to CI mode, (e) announce CI unfrozen. Mirrors the manual procedure in §8.4 step-for-step. Idempotent; `--dry-run` for plan-only.
+1. **`spi cluster baseline-refresh` subcommand** (design §8.4). Coordinated rebase to the HelmRelease baseline across the current service forks: (a) announce CI freeze, (b) verify no in-flight workflow runs across forks (`gh run list --status in_progress`), (c) `flux resume kustomization --all -n flux-system` and wait for convergence, (d) `flux suspend` to return to CI mode, (e) announce CI unfrozen. Mirrors the manual procedure in §8.4 step-for-step. Idempotent; `--dry-run` for plan-only.
 
 2. **Service health badge cron + endpoint** (design §8.5). A 5-minute scheduled workflow in `osdu-spi-stack` that probes each service's `/info` endpoint via the gateway and writes a status badge to the stack repo README. Lets a PR author quickly check "is the cluster healthy right now?" before assuming a test failure is their bug. Per-service health rows so contamination is attributable.
 
@@ -724,7 +724,7 @@ Implement `spi onboard --service <name> --repo <org/repo> --aks-cluster <cluster
 **Slot:** `SETTINGS-APPLY` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `M` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
-`init.yml` runs **once** on a fresh fork and `deploy-fork-resources.sh` deletes the init helpers (`init.yml`, `init-complete.yml`, `.github/local-actions/`) after merge — the entire `.github/local-actions/` path is in `sync-config.json`'s `cleanup_rules.directories`. Existing service forks (entitlements, legal, schema, storage, search, indexer, file) therefore have **no path** to re-run `ONBOARD-INIT-A` or `ONBOARD-INIT-B` — those are fresh-fork-only. `sync.yml` brings new files into forks via PR but only for paths explicitly declared in `sync-config.json` — and that file currently does NOT list `.github/rulesets/**`, `.github/template-workflows/settings-apply.yml`, or any settings-apply helpers, so without an explicit config change nothing in this slot actually reaches existing forks. Additionally, the existing `setup-rulesets.sh` is **POST-only**: it creates rulesets the first time but errors (HTTP 422) if a ruleset with the same name already exists, blocking idempotent updates.
+`init.yml` runs **once** on a fresh fork and `deploy-fork-resources.sh` deletes the init helpers (`init.yml`, `init-complete.yml`, `.github/local-actions/`) after merge — the entire `.github/local-actions/` path is in `sync-config.json`'s `cleanup_rules.directories`. Current service forks (`partition`, `entitlements`, `legal`, `schema`, `file`, `storage`, `indexer`, `indexer-queue`, `search`, `workflow`) have already been initialized from this fork and are running, so they have **no path** to re-run `ONBOARD-INIT-A` or `ONBOARD-INIT-B` — those are fresh-fork-only. `sync.yml` brings new files into forks via PR but only for paths explicitly declared in `sync-config.json` — and that file currently does NOT list `.github/rulesets/**`, `.github/template-workflows/settings-apply.yml`, or any settings-apply helpers, so without an explicit config change nothing in this slot actually reaches existing forks. Additionally, the existing `setup-rulesets.sh` is **POST-only**: it creates rulesets the first time but errors (HTTP 422) if a ruleset with the same name already exists, blocking idempotent updates.
 
 This slot closes all gaps: makes the rulesets helper idempotent, **relocates it from the init-only `.github/local-actions/` path to the durable `.github/scripts/settings-apply/` path** (so it's not subject to init-time cleanup), adds the reconciliation workflow, and explicitly extends `sync-config.json` so all the new artifacts actually propagate to forks.
 
@@ -916,7 +916,7 @@ Author `doc/src/adr/032-cicd-deploy-loop-via-suspended-flux.md` per the existing
 
 **Reference:** Design doc Appendix B (ADR-032 draft).
 
-**Out of scope:** Implementation work (covered by W2-W12).
+**Out of scope:** Implementation work (covered by the Phase 2 workflow and onboarding slots).
 
 ---
 
