@@ -63,10 +63,10 @@ Three slots span the cut and are split into A/B sub-issues, each shipping in its
 
 ### Build-lane vs deploy-lane firing order
 
-The lanes are **firing-order priorities**, not hard sequence locks. Agents can be fired on deploy-lane sub-issues in parallel with build-lane ones — the constraint is which upstream PR collects which sandbox PRs once they're green.
+The lanes are **firing-order priorities**, not hard sequence locks. Build-lane implementation and deploy-lane docs can proceed in parallel; deploy-lane code/cluster-ops tasks wait for the relevant Phase 0 gate answers unless explicitly launched as draft-only scaffolding.
 
 - **Build lane fires first** because the Build PR is the priority upstream artifact. Gate 0c (GHCR policy) is **resolved for the sandbox + `danielscholl-osdu` phase** — public GHCR proceeds per design §7.4. A future upstream pivot to MCR or ACR-with-AcrPull stays localized to `W2` / `ONBOARD-INIT-A` / `SETTINGS-APPLY`'s visibility helper; the private-GHCR + per-fork imagePullSecret fallback is broader-touch (also needs cluster Secrets + chart `imagePullSecrets:` + an ONBOARD step) — see design §7.4 *"Migration-swap scope"*.
-- **Deploy lane fires as drafts in parallel** because most acceptance criteria explicitly say *"scaffolding with documented assumptions is fine"* — gate findings revise drafts in-PR rather than restarting agents.
+- **Deploy lane is staged.** Deploy-lane docs (`ADR-032`, `ADR-034`, `ADR-036`, `SPECS-B`) can fire immediately. Deploy-lane code/cluster-ops tasks (`W3`, `W4`, `W8`, `ONBOARD`, `STACK-OPS`, `ONBOARD-INIT-B`, `W13`, `W5b`, `W14`, `W10` second pass) should wait until Phase 0 gate answers are available, unless a human explicitly launches them as draft-only scaffolding with documented assumptions.
 - **`W5b` waits for the deploy-lane composite actions** (`W3`, `W4`) plus `W13`. Drafting `W5b` earlier references non-existent paths and burns agent context.
 
 ---
@@ -137,7 +137,7 @@ graph TD
 
 ## Wave strategy
 
-The wave order is **build-lane first** because the Build PR is the priority upstream artifact. Gate 0c is **resolved for the sandbox + danielscholl-osdu phase** (public GHCR proceeds per design §7.4). Deploy-lane agents fire in parallel as drafts; reviewer attention prioritizes the build lane until the Build PR merges. Each wave is fully parallel internally.
+The wave order is **build-lane first** because the Build PR is the priority upstream artifact. Gate 0c is **resolved for the sandbox + danielscholl-osdu phase** (public GHCR proceeds per design §7.4). Deploy-lane docs can fire in parallel, but deploy-lane code/cluster-ops agents should wait for Phase 0 gate answers unless explicitly launched as draft-only scaffolding. Reviewer attention prioritizes the build lane until the Build PR merges.
 
 ### Build lane (feeds Build PR)
 
@@ -148,16 +148,41 @@ The wave order is **build-lane first** because the Build PR is the priority upst
 | **3 — onboarding + settings reconciliation** | `ONBOARD-INIT-A`, `SETTINGS-APPLY` | `ONBOARD-INIT-A` is the **fresh-fork** path (consumed by `init.yml` on template create): GHCR visibility + `SERVICE_NAME`/`MAVEN_PROFILE` vars. `SETTINGS-APPLY` is the **existing-fork** path: idempotent `setup-rulesets.sh` + `settings-apply.yml` workflow that reconciles rulesets, GHCR visibility, and surfaces missing per-service variables via an issue. Existing service forks need `SETTINGS-APPLY` because `init.yml` deletes its own helpers and can't be re-dispatched. Retention is **W11's job alone**, not ONBOARD-INIT-A's |
 | **4 — wire it together** | `W5a`, `W10` (first pass) | `W5a` blocked by `W1` + `W2`. `W10`'s first pass adds the `docker-build` required check; second pass lands with deploy-lane wave 4 |
 
-### Deploy lane (feeds Deploy PR — fires in parallel as drafts)
+### Deploy lane (feeds Deploy PR — docs first, code after Phase 0 gates)
 
 | Wave | Slots | Why this order |
 |------|-------|----------------|
 | **1 — ground the design** | `ADR-032`, `ADR-034`, `ADR-036`, `SPECS-B` | Docs-only; ADR-036 codifies the §5.5 trust boundary that W5b enforces |
-| **2 — composite actions** | `W3`, `W4`, `W8` | The deploy-path code. Hard-blocked from merging until Phase 0 gates 0a/0b/0d/0e/0f close — scaffolding with documented assumptions is the expected pattern |
-| **3 — onboarding + cluster operations (cross-repo)** | `ONBOARD` (`osdu-spi-stack`), `STACK-OPS` (`osdu-spi-stack` — baseline-refresh + health badge + drift alerting), `ONBOARD-INIT-B` (this repo) | Cluster-side IAM (`spi onboard`) + cluster-side ops tooling (`spi cluster baseline-refresh`, health badge cron, Flux drift alerting) + fork-side `AZURE_*` check + remaining per-service vars. The two stack-side issues are independent — fan out together |
+| **2 — composite actions** | `W3`, `W4`, `W8` | The deploy-path code. Launch after Phase 0 gates 0a/0b/0d/0e/0f are answered, unless a human explicitly accepts draft-only scaffolding. Hard-blocked from merging until those gates close |
+| **3 — onboarding + cluster operations (cross-repo)** | `ONBOARD` (`osdu-spi-stack`), `STACK-OPS` (`osdu-spi-stack` — baseline-refresh + health badge + drift alerting), `ONBOARD-INIT-B` (this repo) | Cluster-side IAM (`spi onboard`) + cluster-side ops tooling (`spi cluster baseline-refresh`, health badge cron, Flux drift alerting) + fork-side `AZURE_*` check + remaining per-service vars. Launch after gates 0b/0f and the relevant per-service values are known; the two stack-side issues are independent once unblocked |
 | **4 — wire it together** | `W13`, `W5b`, `W14`, `W10` (second pass) | `W5b` blocked by `W3`, `W4`, `W13`. `W14` blocked by `W3`. `W10`'s second pass adds `deploy` and `integration-test` to required checks |
 
-**Phase 0 runs in parallel with all waves**, human-driven. Gate findings may trigger small revisions to deploy-lane wave 2 (e.g., Gate 0b might flip `W3`'s RoleBinding form). Plan for that — it's normal, not a setback. Build-lane work is largely insensitive to gate findings other than 0c.
+**Phase 0 runs in parallel with build-lane waves and deploy-lane docs**, human-driven. Gate findings unlock or revise deploy-lane code work (e.g., Gate 0b might select `W3`'s RoleBinding subject form). Build-lane work is largely insensitive to gate findings other than 0c.
+
+## Copilot CLI orchestration plan
+
+Use the Copilot CLI session as the control plane and Copilot coding agent tasks as short-lived implementers. The default unit of work is one GitHub issue/slot per task and one PR per task.
+
+### Pre-flight fixes
+
+1. Authorize `gh` for the organization and verify `gh issue view` plus `gh agent-task list` work before batch launching.
+2. Merge updated `.github/copilot-instructions.md` before launching bulk agents so every cloud-agent task inherits the same workflow-location, credential-boundary, and hot-file rules.
+3. Verify the Phase 1 template-sync round trip before firing implementation waves beyond docs.
+4. Maintain a wave board with issue, slot, lane, size, dependencies, locked files, agent task ID, PR URL, CI status, review status, and exit criteria.
+
+### Launch rules
+
+- Launch with `gh agent-task create` for reproducible prompts and tracking; reserve interactive `/delegate` for ad-hoc follow-up.
+- Prompt each task with the issue number, slot ID, allowed files, out-of-scope items, required design references, validation expectations, and PR body requirements.
+- Cap concurrent M/L code tasks at two or three. XS/S docs can fan out more broadly.
+- Do not run parallel tasks that touch the same hot file. Hot files include `.github/template-workflows/validate.yml`, `.github/rulesets/default-branch.json`, `.github/workflows/init.yml`, `.github/copilot-instructions.md`, and ADR index/list files.
+- Launch cross-repo implementation tasks from the target repo. `ONBOARD` and `STACK-OPS` are implemented in `osdu-spi-stack`; issues in this repo are tracking stubs only.
+
+### Review gates
+
+- Run a Copilot CLI review or equivalent code review on each returned PR before merge.
+- Require security-focused review for workflow, secret, OIDC, Azure login, `permissions:`, `id-token: write`, `pull_request_target`, or trust-boundary changes.
+- Treat cloud-agent deploy-lane validation as incomplete until a human/operator verifies the live AKS/OIDC/integration-test path required by Phase 0.
 
 ## Live mapping
 

@@ -11,12 +11,16 @@ You are working with the Fork Management Template, an automated solution for man
 - `fork_upstream` - Automatically tracks upstream repository changes
 - `fork_integration` - Staging branch for conflict resolution before merging to main
 
-### Core Workflows
-1. **init.yml** - Repository initialization and configuration
-2. **sync.yml** - Automated upstream synchronization with AI-enhanced PR descriptions
-3. **build.yml** - Build and test automation for Java/Maven projects
-4. **validate.yml** - PR validation, commit message checks, and conflict detection
-5. **release.yml** - Automated semantic versioning with Release Please
+### Workflow layout
+- `.github/workflows/` contains template-development workflows that run in this template repository, such as initialization, template CI, docs, and development release automation.
+- `.github/template-workflows/` contains fork-production workflows that are copied into generated service forks during initialization/template sync. Production fork changes to `sync.yml`, `build.yml`, `validate.yml`, `release.yml`, `cascade.yml`, or similar workflows belong here.
+- `.github/actions/` contains reusable composite actions consumed by template workflows.
+
+### Core fork-production workflows
+1. **sync.yml** - Automated upstream synchronization with AI-enhanced PR descriptions
+2. **build.yml** - Build and test automation for Java/Maven projects
+3. **validate.yml** - PR validation, commit message checks, and conflict detection
+4. **release.yml** - Automated semantic versioning with Release Please
 
 ## Development Guidelines
 
@@ -49,16 +53,35 @@ Example: `agent/123-fix-sync-conflict`
 ## Common Tasks
 
 ### Adding New Workflow Features
-1. Create workflow file in `.github/workflows/`
-2. Follow existing patterns for permissions and error handling
-3. Update documentation in `doc/` directory
-4. Add ADR if making architectural changes
+1. For fork-production behavior, edit or add files under `.github/template-workflows/`, not `.github/workflows/`.
+2. For template-repository-only automation, use `.github/workflows/`.
+3. Put reusable workflow logic in composite actions under `.github/actions/` when it is shared or complex.
+4. Follow existing patterns for permissions, pinned actions, shell style, and error handling.
+5. Update documentation in `doc/` and add an ADR if making architectural changes.
 
 ### Modifying Sync Behavior
-1. Edit `.github/workflows/sync.yml`
+1. Edit `.github/template-workflows/sync.yml`
 2. Test with `workflow_dispatch` before relying on schedule
 3. Consider impact on fork_integration branch
 4. Update conflict resolution logic if needed
+
+### Epic #1 CI/CD changes
+The CI/CD epic extends fork production validation from:
+
+```text
+Unit Test -> Docker Build -> Deploy -> Integration Test
+```
+
+Apply these rules when working on Epic #1 sub-issues:
+
+1. Implement only the assigned GitHub issue/slot. Read that slot in `doc/product/cicd-implementation-plan.md` plus the referenced sections in `doc/product/cicd-build-deploy-test-design.md`; do not implement adjacent slots.
+2. New Docker Build, Deploy, and Integration Test jobs live in `.github/template-workflows/validate.yml` only. Do not add deploy or integration-test behavior to `.github/template-workflows/build.yml`.
+3. Preserve the credential boundary: build-lane work runs with `GITHUB_TOKEN`; deploy-lane work is the only lane that may acquire Azure federated identity.
+4. Never run cluster-credential-bearing jobs for external-fork PRs, `pull_request_target`, or `dependabot[bot]`. Use the trust-boundary design in ADR-036/design section 5.5 when implementing deploy-lane workflow gates.
+5. Treat `.github/template-workflows/validate.yml`, branch-protection rulesets, ADR indexes/lists, and instruction files as hot files. Avoid unrelated edits and expect orchestration to serialize work touching them.
+6. Third-party actions must be pinned to a full commit SHA with a version comment, matching existing workflow convention.
+7. Do not log secret values. Mask any value sourced from `secrets.*` or Key Vault; logging variable names, resource IDs, and secret names is acceptable.
+8. Required inputs should fail loudly when missing. Do not guess service names, deployment names, Maven profiles, or Azure resource identifiers.
 
 ### Java/Maven Development
 ```bash
@@ -136,8 +159,12 @@ jobs:
 
 ### Key Files
 - `doc/src/adr/` - Architecture decisions
-- `.github/workflows/` - All automation workflows
-- `doc/product-prd.md` - Product requirements
+- `.github/template-workflows/` - Fork-production workflows copied into service forks
+- `.github/workflows/` - Template-development workflows for this repository
+- `.github/actions/` - Reusable composite actions
+- `doc/product/prd.md` - Product requirements
+- `doc/product/cicd-implementation-plan.md` - CI/CD epic work breakdown and agent slot catalog
+- `doc/product/cicd-build-deploy-test-design.md` - CI/CD epic design
 
 ### Environment Variables
 - `UPSTREAM_OWNER` - Upstream repository owner
@@ -159,4 +186,3 @@ gh pr status
 # View issues
 gh issue list --label copilot
 ```
-
