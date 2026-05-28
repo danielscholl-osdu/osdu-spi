@@ -1098,15 +1098,15 @@ Add a `workflow_dispatch` "force-full-pipeline" input to `.github/template-workf
 - `.github/template-workflows/validate.yml`
 
 **Acceptance criteria:**
-- [ ] `workflow_dispatch` block adds a new input (e.g. `force_full_pipeline: boolean, default: false`)
-- [ ] The new `docker-build` / `deploy` / `integration-test` jobs' `if:` clauses recognize the input (so they run even when triggered by `workflow_dispatch` regardless of paths-ignored changes)
+- [ ] `workflow_dispatch` block adds a new input (`force_full_pipeline: boolean, default: false`)
 - [ ] Existing `workflow_dispatch` inputs (`post_init`, `initialization_complete`) are preserved
-- [ ] README or in-file comment documents that the trigger is "run me after template-sync if you need to verify workflow changes"
+- [ ] In-file comment documents that the trigger is "run me after template-sync if you need to verify workflow changes"
 - [ ] No change to push/pull_request trigger behavior
+- [ ] **No `if:` clause changes in this PR.** The `|| (workflow_dispatch && force_full_pipeline)` half of the §5.5 gating clause lands with `W5a` (#22) on `docker-push` and `W5b` (#6) on `deploy`/`integration-test`. The input declaration is harmless before any job references it.
 
-**Reference:** Design doc §9.3 (W13) + current `template-workflows/validate.yml` lines 41-58 (the paths-ignore block).
+**Reference:** Design doc §9.3 (W13) + §5.5 (gating clause structure) + current `template-workflows/validate.yml` (paths-ignore block).
 
-**Out of scope:** Removing the paths-ignore rules (they exist for good reason — doc-only changes shouldn't fire CI). Changing the trust boundary clauses (those still apply).
+**Out of scope:** Removing the paths-ignore rules (they exist for good reason — doc-only changes shouldn't fire CI). Modifying any job's `if:` clause (those changes land with W5a/W5b).
 
 ---
 

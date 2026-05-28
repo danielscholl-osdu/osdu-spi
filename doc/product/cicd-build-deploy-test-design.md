@@ -315,7 +315,7 @@ Callers MUST compose the deploy reference as `${image_repository}@${image_digest
 ### 5.2 Deploy
 
 **Inputs:**
-- Image reference from `docker-build` (digest preferred, tag acceptable)
+- Image reference from `docker-push` (digest preferred, tag acceptable — `docker-build` is the validate-only no-push job and emits no outputs; the trusted-push job is the digest source)
 - Service name (derives Kubernetes deployment name)
 - Target namespace (default: `osdu`)
 - Target cluster (resolved from repo variables)
@@ -324,7 +324,7 @@ Callers MUST compose the deploy reference as `${image_repository}@${image_digest
 - Deployment updated and rolled out
 - New pod ready and healthy (liveness + readiness probes passing)
 
-**Trigger:** `needs: docker-build`
+**Trigger:** `needs: docker-push`
 
 **Implementation surface:**
 
@@ -476,7 +476,10 @@ check-repo-state
    java-build                    code-validation (existing — runs in parallel,
         │                                          independent of deploy chain)
         ▼
-   docker-build        (NEW — gated by §5.5 trust rules)
+   docker-build        (NEW — validate-only, runs on every event, no packages:write)
+        │
+        ▼
+   docker-push         (NEW — gated by §5.5 trust rules, packages:write)
         │
         ▼
      deploy            (NEW — per-service concurrency, Flux pre-check)
@@ -502,7 +505,7 @@ The new jobs hold a federated identity with `Azure Kubernetes Service Cluster Us
 | Tag push (release-please) | Tagged commit (already in `main`) | Yes | **No** — tag pushes go through `release.yml`, NOT `validate.yml`. `release.yml` only re-tags the existing image with the semver (W7); it does not re-deploy, since deploy already ran on the merge-to-main that produced the tagged commit. The federated credential still needs `refs/tags/v*` because `release.yml` authenticates to GHCR for the re-tag. |
 | Cascade workflow push to `fork_integration` | Cascade-resolved tree | Yes | Yes — see §5.6 |
 
-**Gating clause used by docker-build / deploy / integration-test jobs:**
+**Gating clause used by docker-push / deploy / integration-test jobs:** (per W5a's two-job split, the validate-only `docker-build` job runs on every event with `permissions: contents: read` only — no trust clause, no `packages: write`. The clause below lives on the trusted-push job and is replicated as defense-in-depth on the downstream deploy / integration-test jobs.)
 
 ```yaml
 if: |
@@ -1345,7 +1348,7 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 | Layer | Contents |
 |---|---|
 | Composite actions | `java-build` (`maven_profile` input added — W1), new `docker-build` action (W2) |
-| Workflow wiring | `validate.yml` gains the `docker-build` job only — no `if:` trust-boundary gating (build is safe on PRs); no deploy/integration-test jobs yet (W5a) |
+| Workflow wiring | `validate.yml` gains both new build-path jobs (W5a): the validate-only `docker-build` (no `if:` trust-boundary, no `packages: write`, runs on every event including external-fork PRs) and the trusted-only `docker-push` (carries the §5.5 trust-boundary `if:` clause + `packages: write`). No deploy/integration-test jobs yet — those land with W5b in Deploy PR. |
 | Other workflows | `release.yml` adds the `:<version>` re-tag step (W7); new `ghcr-retention.yml` scheduled workflow (W11) |
 | Onboarding (fresh forks, fork-side) | `init.yml` / init-helpers gain GHCR visibility flip + `SERVICE_NAME`/`MAVEN_PROFILE` per-service variable bootstrap (ONBOARD-INIT-A). **No retention** (that's W11) and **no separate ruleset extension helper** (existing `setup-rulesets.sh` call from `init-complete.yml` already POSTs the up-to-date `default-branch.json` from W10) |
 | Settings reconciliation (existing forks) | Relocate `setup-rulesets.sh` to durable `.github/scripts/settings-apply/` + make it idempotent (PUT-on-exists); new helpers `check-required-variables.sh` + `reconcile-ghcr-visibility.sh`; new `settings-apply.yml` workflow on schedule + dispatch + ruleset/helper path changes; **`sync-config.json` extended** so the new rulesets dir, helper scripts dir, and workflow actually propagate via template-sync (SETTINGS-APPLY) |
@@ -1381,17 +1384,17 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 3. **Pre-merge checks (Build PR):**
    - Sandbox proof points referenced: 10+ build-green runs on partition (build pipeline only; deploy not required green for this PR)
    - Upstream-publishing posture confirmed: GHCR-as-design-default acknowledged in PR description with reference to Azure-org precedent (§7.4); if Azure-org review requests MCR or private-GHCR fallback, swap path documented (§7.4 *"Migration-swap scope"*)
-   - Existing service forks notified that template-sync will bring `docker-build` to them; they will start producing images but no cluster effect (no deploy job yet)
+   - Existing service forks notified that template-sync will bring the `docker-build` / `docker-push` job pair to them; they will start producing images on internal PRs and pushes (validate-only Dockerfile compile on external-fork PRs), with no cluster effect yet (no deploy job)
 
 4. **Merge sequence (Build PR):**
    - ADR-033, ADR-035 first (documentation)
    - `java-build` change + `docker-build` action + `ghcr-retention.yml` + ONBOARD-INIT-A helpers (code, no live trigger change yet)
-   - `validate.yml` docker-build wiring + ruleset update last (live trigger change)
+   - `validate.yml` docker-build + docker-push wiring + ruleset update last (live trigger change)
 
 **Exit criteria (Build PR):**
 - Build PR merged to `Azure/osdu-spi/main`
-- Template-sync run propagates to existing service forks; their `docker-build` job runs green on the next PR
-- `default-branch.json` ruleset update reaches forks; `docker-build` is now a required check
+- Template-sync run propagates to existing service forks; their `docker-build` job (and `docker-push` on internal PRs) runs green on the next PR
+- `default-branch.json` ruleset update reaches forks; `🐳 Docker Build` is now a required check (the validate-only job runs on every event so external-fork PRs can satisfy it; `docker-push` skipping on untrusted events is not a required check)
 - No regression in existing `validate.yml` or `release.yml` behaviour (java-build still runs without `maven_profile` set, release.yml still produces the existing artifacts)
 
 #### 9.5.B Phase 4b — Deploy PR
@@ -1565,16 +1568,35 @@ Questions that have been resolved by this design pass are listed with their reso
 
 ### Appendix A — Workflow YAML Sketches
 
-**A.1. Modified `template-workflows/validate.yml` (excerpt — new jobs only). Note the `if:` clause on `docker-build` implements the §5.5 trust boundary; downstream jobs inherit by `needs:`.**
+**A.1. Modified `template-workflows/validate.yml` (excerpt — new jobs only). Per W5a's two-job split, `docker-build` runs on every event without `packages: write` (no privilege-escalation surface on untrusted Dockerfile content). `docker-push` carries the §5.5 trust-boundary `if:` clause and the GHCR write permission; downstream `deploy` / `integration-test` chain off it via `needs:` and replicate the same `if:` as defense-in-depth.**
 
 ```yaml
   docker-build:
     name: "🐳 Docker Build"
     needs: [check-initialization, check-repo-state, java-build]
+    if: needs.java-build.outputs.build_result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read    # no packages: write — runs untrusted Dockerfile content
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: build-artifacts
+          path: .
+      - uses: ./.github/actions/docker-build
+        with:
+          push: 'false'    # validates Dockerfile compiles; no GHCR push, no login
+          dockerfile_path: devops/azure/Dockerfile
+          image_name: ${{ vars.SERVICE_NAME }}
+          registry: ghcr.io
+          org: ${{ github.repository_owner }}
+
+  docker-push:
+    name: "🐳 Docker Push"
+    needs: [docker-build]
     if: |
       (
-        needs.check-repo-state.outputs.is_initialized == 'true' &&
-        needs.check-repo-state.outputs.is_java_repo == 'true' &&
         needs.java-build.outputs.build_result == 'success' &&
         github.actor != 'dependabot[bot]' &&
         github.event_name != 'pull_request_target' &&
@@ -1589,17 +1611,18 @@ Questions that have been resolved by this design pass are listed with their reso
       contents: read
       packages: write
     outputs:
-      image_repository: ${{ steps.build.outputs.image_repository }}
-      image_digest: ${{ steps.build.outputs.image_digest }}
+      image_repository: ${{ steps.push.outputs.image_repository }}
+      image_digest: ${{ steps.push.outputs.image_digest }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v5
         with:
           name: build-artifacts
           path: .
-      - id: build
+      - id: push
         uses: ./.github/actions/docker-build
         with:
+          push: 'true'
           dockerfile_path: devops/azure/Dockerfile
           image_name: ${{ vars.SERVICE_NAME }}
           registry: ghcr.io
@@ -1607,8 +1630,8 @@ Questions that have been resolved by this design pass are listed with their reso
 
   deploy:
     name: "🚀 Deploy to spi-stack"
-    needs: [docker-build]
-    if: needs.docker-build.result == 'success'
+    needs: [docker-push]
+    if: needs.docker-push.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -1632,8 +1655,8 @@ Questions that have been resolved by this design pass are listed with their reso
           namespace: ${{ vars.K8S_NAMESPACE }}
           deployment_name: ${{ vars.K8S_DEPLOYMENT_NAME }}
           container_name: ${{ vars.K8S_CONTAINER_NAME }}
-          image_repository: ${{ needs.docker-build.outputs.image_repository }}
-          image_digest: ${{ needs.docker-build.outputs.image_digest }}
+          image_repository: ${{ needs.docker-push.outputs.image_repository }}
+          image_digest: ${{ needs.docker-push.outputs.image_digest }}
 
   integration-test:
     name: "🧪 Integration Tests"
@@ -1949,7 +1972,7 @@ Note the `cluster_state` output drives a PR label downstream (see §5.3 exit-cod
 
 **ADR-036: Workflow Trust Boundaries for CI/CD with Cluster Credentials**
 
-> **Context:** The new docker-build/deploy/integration-test jobs hold a federated identity with `Azure Kubernetes Service Cluster User`, namespaced `edit` on the shared `osdu` namespace, and `Key Vault Secrets User`. The default GitHub Actions trigger surface (especially `pull_request_target`, but also dependabot PRs and external-fork PRs) can place attacker-controlled code in a context that has access to repo secrets. Running the new jobs in those contexts would expose the cluster federated identity to attacker code, risking compromise across all 8 forks.
+> **Context:** The new `docker-push` / `deploy` / `integration-test` jobs hold credentials with real blast radius — `docker-push` has `packages: write` on GHCR; `deploy` and `integration-test` hold a federated identity with `Azure Kubernetes Service Cluster User`, a least-privilege custom Role on the shared `osdu` namespace, and `Key Vault Secrets User`. (The validate-only `docker-build` job runs on every event with `permissions: contents: read` only — no `packages: write`, no Azure login — and is therefore exempt from this trust boundary.) The default GitHub Actions trigger surface (especially `pull_request_target`, but also dependabot PRs and external-fork PRs) can place attacker-controlled code in a context that has access to repo secrets. Running the credential-bearing jobs in those contexts would expose the cluster federated identity to attacker code, risking compromise across all 8 forks.
 > **Decision:** The new jobs run only when **all** of the following hold:
 > - Event is `push` to a protected branch, OR `pull_request` from a head repo equal to the base repo, OR `workflow_dispatch`, OR a tag push.
 > - Actor is not `dependabot[bot]` (dependabot-validation.yml is the dependency-update path; dependabot does not need cluster access).
