@@ -6,6 +6,8 @@ This document specifies the deploy stage in `validate.yml` that updates the serv
 
 The deploy stage applies the newly built image digest to the service deployment, verifies rollout health, and emits deployment outputs consumed by integration testing.
 
+> **Forward specification.** This describes the planned post-W5b `validate.yml` state. The `docker-push` / `deploy` / `integration-test` jobs, the `.github/actions/*` composite actions, and the `force_full_pipeline` dispatch input (added by **W13**, alongside the existing `post_init` / `initialization_complete` inputs) do **not** exist in this template repo yet — each is introduced by its implementation slot. The cross-linked ADRs (032/034/036) are authored in PR #37 and resolve on `main` once it merges; until then those links 404 (no `--strict` in `doc/mkdocs.yml`, so the docs build only warns).
+
 ## Architecture Integration
 
 **References**:
