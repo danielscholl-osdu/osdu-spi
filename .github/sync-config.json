@@ -78,6 +78,10 @@
         {
           "path": ".github/template-workflows/integration-cleanup.yml",
           "description": "Fork integration branch synchronization after main merges"
+        },
+        {
+          "path": ".github/template-workflows/oidc-smoke-test.yml",
+          "description": "OIDC federated-credential smoke test for branch and tag subjects (operator tool)"
         }
       ],
       "template_only": [
