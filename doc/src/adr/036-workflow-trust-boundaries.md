@@ -1,5 +1,8 @@
 # ADR-036: Workflow Trust Boundaries for CI/CD
 
+## Status
+**Accepted** - 2026-06-01
+
 ## Context
 
 - New CI/CD jobs (`docker-push`, `deploy`, `integration-test`) hold credentials with real blast radius:
