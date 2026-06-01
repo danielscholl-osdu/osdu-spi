@@ -39,6 +39,7 @@ Architecture Decision Records for Fork Management Template
 | 029 | GitHub App Authentication Strategy         | [ADR-029](029-github-app-authentication-strategy.md) |
 | 030 | CodeQL Summary Job Pattern                 | [ADR-030](030-codeql-summary-job-pattern.md) |
 | 031 | Template Sync Duplicate Prevention Pattern | [ADR-031](031-template-sync-duplicate-prevention.md) |
+| 032 | CI/CD Deploy Loop via Suspended Flux       | [ADR-032](032-cicd-deploy-loop-via-suspended-flux.md) |
 
 ## Overview
 
@@ -200,4 +201,11 @@ These Architecture Decision Records document the key design choices made in the 
 - Label-based tracking with `template-sync` label for PR identification
 - Branch reuse with force-push when template advances
 - Eliminates daily accumulation of open template-sync PRs
+
+**CI/CD Deploy Loop via Suspended Flux (ADR-032)**
+- Flux Kustomizations permanently suspended on shared `osdu-spi-stack` cluster as steady state
+- Per-PR workflows use `kubectl set image` with immutable digest references to deploy services
+- Pre-flight Flux-suspend assertion prevents silent drift from accidental operator resume
+- Baseline refresh (planned outage) is the only mechanism to reset cluster to declared HelmRelease state
+- Eliminates race conditions between CI image injection and GitOps reconciliation
 
