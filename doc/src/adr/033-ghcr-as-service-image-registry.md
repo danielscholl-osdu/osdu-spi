@@ -2,7 +2,7 @@
 
 ## Context
 
-- SPI service images are CI test artifacts consumed by the shared `spi-stack` AKS cluster — not customer-shipped product containers.
+- SPI service images are CI test artifacts consumed by the shared `osdu-spi-stack` AKS cluster — not customer-shipped product containers.
 - The registry must accept pushes from GitHub Actions with no extra auth wiring and allow AKS to pull without per-fork pull secrets.
 - The publishing-org policy context differs for CI/tooling artifacts vs. product containers: Microsoft's MCR onboarding policy (`aka.ms/mcr/onboarding`) targets customer-shipped product containers, while developer-tooling and CI/test-loop containers commonly land on GHCR. Observable Azure-org precedent normalizes public GHCR for this class of artifact (e.g. Eraser, Azure Workload Identity, Azure Developer CLI, Kubelogin, AKS-MCP). See design §7.4.
 
@@ -10,7 +10,7 @@
 
 - Use **public GHCR** as the SPI service image registry.
 - Push images via the workflow `GITHUB_TOKEN` (no extra credential); AKS pulls anonymously (no `imagePullSecret`).
-- Keep image publication aligned with current CI/test-consumer needs in the shared `spi-stack` AKS environment.
+- Keep image publication aligned with current CI/test-consumer needs in the shared `osdu-spi-stack` AKS environment.
 - Defer MCR migration to a future decision (Phase 4 upstream review), not a current requirement.
 
 ## Consequences

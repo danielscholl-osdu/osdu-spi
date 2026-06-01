@@ -213,7 +213,7 @@ These Architecture Decision Records document the key design choices made in the 
 - Baseline refresh (planned outage) is the only mechanism that resets the cluster to declared HelmRelease state
 
 **GHCR as Service Image Registry (ADR-033)**
-- Public GHCR for SPI service CI/test artifacts consumed by the `spi-stack` AKS cluster
+- Public GHCR for SPI service CI/test artifacts consumed by the `osdu-spi-stack` AKS cluster
 - Push via `GITHUB_TOKEN`, pull anonymously from AKS — no `imagePullSecret`
 - MCR migration deferred; ACR/MCR swap is localized to the visibility helper, private-GHCR fallback is broader-touch
 
