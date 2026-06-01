@@ -54,6 +54,22 @@ outputs:
   pod_logs_url: <artifact-url>
 ```
 
+### Concurrency
+
+Deploy uses a **per-service** concurrency lock (not cluster-wide), so different services deploy in parallel while two PRs for the same service queue:
+
+```yaml
+concurrency:
+  group: spi-stack-${{ vars.SERVICE_NAME }}
+  cancel-in-progress: false
+```
+
+`cancel-in-progress: false` is deliberate — cancelling a deploy mid-rollout leaves the cluster in a partially-deployed state. Per design §8.1, escalate to a cluster-wide group (`spi-stack-osdu-deploy`) only if cross-service contention starts causing test flakes.
+
+### Flux-suspend pre-check
+
+Before patching, the job asserts every Flux Kustomization is still suspended (per [ADR-032](../src/adr/032-cicd-deploy-loop-via-suspended-flux.md)) and fails fast if not. This is necessary but **not sufficient** — it cannot stop a `flux resume` *mid-rollout*; the downstream integration-test post-rollout digest re-check (§5.3) is the complement that catches that case.
+
 ### Trust Boundary Handling
 
 Deploy uses the trust-boundary `if:` gate from design §5.5 and [ADR-036](../src/adr/036-workflow-trust-boundaries.md):

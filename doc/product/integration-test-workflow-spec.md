@@ -52,6 +52,19 @@ outputs:
   cluster_state: 'healthy' | 'contaminated'
 ```
 
+### Exit-Code Semantics (required-check compatible)
+
+The job always exits with a binary success/failure code so branch-protection enforcement is unambiguous. Cross-service cluster contamination is surfaced as metadata (a PR label + step summary), never as a relaxation of the gate:
+
+| Test outcome | Cluster state | Job exit | `test_result` | PR label |
+|---|---|---|---|---|
+| Pass | Healthy | success | `pass` | (none) |
+| Pass | Contaminated (a dependency was unhealthy at probe time) | **success** | `pass-advisory` | `ci/cluster-was-contaminated` |
+| Fail | Healthy | failure | `fail` | (none) |
+| Fail | Contaminated | failure | `fail` | `ci/cluster-was-contaminated` |
+
+`pass-advisory` means the tests passed **and** the start-of-run cross-service health probe found a dependency unhealthy — reviewers see the `ci/cluster-was-contaminated` label and know the pass may not be fully authoritative. It is metadata only; it never relaxes the required check. Merging despite real contamination-induced failures is an admin-override break-glass action, not a per-PR toggle.
+
 ### Trust Boundary Handling
 
 Integration-test uses the same trust-boundary `if:` gate as deploy per design §5.5 and [ADR-036](../src/adr/036-workflow-trust-boundaries.md):
