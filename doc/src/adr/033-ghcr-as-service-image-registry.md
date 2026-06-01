@@ -7,7 +7,7 @@
   - Microsoft MCR onboarding policy (`aka.ms/mcr/onboarding`) applies to customer product container publishing.
   - SPI service images are internal CI/tooling artifacts, so the policy scope does not require immediate MCR publishing.
 - Observable precedent in `github.com/Azure` normalizes public GHCR usage for CI/tooling containers:
-  - 300+ public GHCR packages exist.
+  - 300+ public GHCR packages exist (as observed in the ADR-033 design analysis snapshot).
   - Examples include Eraser (~1.55B downloads), `azd`, `kubelogin`, `c3`, and `azure-workload-identity`.
 
 ## Decision
@@ -40,12 +40,5 @@
     - Chart-level `imagePullSecrets:` wiring.
     - Secret-provisioning step in `ONBOARD`.
   - Not selected due to higher rollout and maintenance complexity across forks.
-
-## References
-
-- Design doc Appendix B (ADR-033)
-- Design doc §7.4 (fallback and migration-swap scope)
-
----
 
 [← ADR-031](031-template-sync-duplicate-prevention.md) | :material-arrow-up: [Catalog](index.md)
