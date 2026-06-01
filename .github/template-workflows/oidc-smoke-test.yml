@@ -51,11 +51,14 @@ jobs:
         id: az_login
         uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5  # v2.3.0
         with:
-          # client-id/tenant-id/subscription-id are non-secret identifiers; read them from repo
-          # *variables* so the failure-guidance step below can echo the client-id (a secret is masked).
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          # Use the SAME secret inputs the deploy workflow (aks-deploy) uses, so this smoke test
+          # exercises the real federated-credential path — the onboarding contract writes these as
+          # secrets. The failure-guidance step below prints the *variable* copy of the client-id for
+          # operator diagnostics, since secrets are masked in logs (design §6.1 sets AZURE_CLIENT_ID
+          # as both a secret and a variable).
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: "On login failure — print subject claim guidance"
         if: failure() && steps.az_login.outcome == 'failure'
