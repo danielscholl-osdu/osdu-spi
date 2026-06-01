@@ -1,5 +1,8 @@
 # ADR-034: Federated Identity for Actions to Azure
 
+## Status
+**Accepted** - 2026-06-01
+
 ## Context
 
 - Deploy and integration-test workflows need Azure access (AKS + Key Vault).
@@ -35,3 +38,7 @@
   - Rejected: long-lived secrets and larger compromise surface.
 - **Use one shared identity for all service forks**
   - Rejected: poor blast-radius isolation and weaker service-level boundary control.
+
+---
+
+[← ADR-031](031-template-sync-duplicate-prevention.md) | :material-arrow-up: [Catalog](index.md)
