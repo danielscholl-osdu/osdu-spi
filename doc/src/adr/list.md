@@ -39,6 +39,7 @@ Architecture Decision Records for Fork Management Template
 | 029 | GitHub App Authentication Strategy         | [ADR-029](029-github-app-authentication-strategy.md) |
 | 030 | CodeQL Summary Job Pattern                 | [ADR-030](030-codeql-summary-job-pattern.md) |
 | 031 | Template Sync Duplicate Prevention Pattern | [ADR-031](031-template-sync-duplicate-prevention.md) |
+| 034 | Federated Identity for Actions to Azure    | [ADR-034](034-federated-identity-actions-to-azure.md) |
 
 ## Overview
 
@@ -201,3 +202,7 @@ These Architecture Decision Records document the key design choices made in the 
 - Branch reuse with force-push when template advances
 - Eliminates daily accumulation of open template-sync PRs
 
+**Federated Identity for Actions to Azure (ADR-034)**
+- Per-service managed identity replaces static `AZURE_CREDENTIALS` secrets
+- Required federated subjects cover branches wildcard, `pull_request`, and tags wildcard
+- Onboarding is split at the credential boundary: `spi onboard` (cluster IAM/RBAC) + `init.yml` extension (fork setup)
