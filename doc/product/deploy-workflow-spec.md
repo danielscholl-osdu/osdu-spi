@@ -73,6 +73,8 @@ if: |
   )
 ```
 
+The internal-PR check is intentionally guarded by `github.event_name != 'pull_request' || ...`, so `github.event.pull_request.*` is only evaluated for pull request events.
+
 This gate ensures cluster credentials are only used for trusted events while preserving the explicit manual `workflow_dispatch` escape hatch.
 
 ## Workflow Architecture

@@ -71,6 +71,8 @@ if: |
   )
 ```
 
+The internal-PR check is intentionally guarded by `github.event_name != 'pull_request' || ...`, so `github.event.pull_request.*` is only evaluated for pull request events.
+
 This keeps deploy and integration-test on a single trusted execution boundary.
 
 ## Workflow Architecture
