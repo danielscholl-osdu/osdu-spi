@@ -13,7 +13,7 @@ The docker-build job runs inside `validate.yml` after the `java-build` job succe
 **References**:
 - [ADR-033: GHCR as Service Image Registry](../src/adr/033-ghcr-as-service-image-registry.md)
 - [ADR-035: Azure-Only Maven Profile](../src/adr/035-azure-only-maven-profile.md)
-- [ADR-036: Workflow Trust Boundaries](../src/adr/036-workflow-trust-boundaries.md) *(ships with Deploy PR — forward reference)*
+- [ADR-036: Workflow Trust Boundaries](../src/adr/036-workflow-trust-boundaries.md) *(ADR authored in wave 1; `if:`-clause enforcement lands in W5b/Deploy PR)*
 
 **Key Benefits**:
 - **Universal Dockerfile Validation**: Compile check runs on every event, including external-fork PRs, so contributors get early feedback before any merge
@@ -77,6 +77,8 @@ permissions:
           registry: ghcr.io
           org: ${{ github.repository_owner }}
 ```
+
+> **Note:** action references in this excerpt are shown by tag for readability. In the real `validate.yml`, pin every third-party action to a full commit SHA with a `# vX.Y.Z` comment (repo convention), and confirm the pinned major versions exist (`actions/download-artifact` current major is v4, not v5).
 
 ## Composite Action Contract
 
@@ -220,7 +222,7 @@ The action defaults to `devops/azure/Dockerfile`. Service forks follow the conve
 - [Parent design doc: OSDU SPI CI/CD Build, Deploy, Integration Test](./cicd-build-deploy-test-design.md) — §5.1 (Docker Build), §9.5.A (Build PR scope)
 - [ADR-033: GHCR as Service Image Registry](../src/adr/033-ghcr-as-service-image-registry.md)
 - [ADR-035: Azure-Only Maven Profile](../src/adr/035-azure-only-maven-profile.md)
-- [ADR-036: Workflow Trust Boundaries](../src/adr/036-workflow-trust-boundaries.md) *(ships with Deploy PR)*
+- [ADR-036: Workflow Trust Boundaries](../src/adr/036-workflow-trust-boundaries.md) *(ADR authored in wave 1; `if:`-clause enforcement lands in W5b/Deploy PR)*
 - [Build Workflow Specification](./build-workflow-spec.md)
 - [Validate Workflow Specification](./validate-workflow-spec.md)
 - [Release Workflow Specification](./release-workflow-spec.md)
