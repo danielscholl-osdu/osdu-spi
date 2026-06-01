@@ -17,8 +17,11 @@ on:
       ref:
         description: >
           Git ref being validated (branch name or tag name, e.g. 'main' or 'v1.0.0').
-          Dispatch this workflow from the matching branch/tag in the GitHub UI so the
-          OIDC subject claim aligns with your federated-credential subject configuration.
+          NOTE: This input is for operator reference only — it does NOT control which ref
+          the workflow runs on or which OIDC subject claim is presented to Azure. The OIDC
+          subject is determined by the branch/tag you select in the GitHub UI 'Run workflow'
+          dropdown. Dispatch this workflow from the matching branch/tag so the OIDC subject
+          claim aligns with your federated-credential subject configuration.
         required: false
         default: 'main'
         type: string
@@ -57,7 +60,7 @@ jobs:
         run: |
           echo "::error::azure/login failed for subject: ${{ steps.subject.outputs.subject }}"
           echo "::error::Verify that a federated credential with exactly this subject exists on"
-          echo "::error::the app/managed-identity '${{ vars.AZURE_CLIENT_ID }}'"
+          echo "::error::the application (App Registration) or managed identity '${{ vars.AZURE_CLIENT_ID }}'"
           echo "::error::in tenant '${{ vars.AZURE_TENANT_ID }}'."
           echo "::error::If you just changed federated credentials, wait ~30 s and retry."
           echo "::error::To add a missing credential:"
