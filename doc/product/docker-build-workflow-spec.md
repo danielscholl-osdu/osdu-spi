@@ -1,6 +1,6 @@
 # Docker Build Workflow Specification
 
-This document specifies the docker build stage in `validate.yml`: the validate-only `docker-build` job (container-image validation on every workflow event) and its companion `docker-push` job (trusted GHCR publication for internal pushes and pull requests).
+This document specifies the docker build stage of `validate.yml`. The validate-only `docker-build` job validates the container image on every workflow event; its companion `docker-push` job performs the trusted GHCR publication for internal pushes and pull requests.
 
 ## Overview
 
@@ -44,7 +44,7 @@ on:
         default: false
 ```
 
-> **Abbreviated.** This shows only the events relevant to `docker-build` plus the new `force_full_pipeline` input. The real `validate.yml` trigger surface is kept in full — including `pull_request_target` (the cascade trigger, [ADR-021](../src/adr/021-pull-request-target-trigger-pattern.md)), the `paths-ignore` lists, and the existing `workflow_dispatch` inputs. W5a adds `force_full_pipeline` **alongside** the existing triggers; it does not replace them.
+> **Abbreviated — illustrative, not the literal trigger block.** This shows only the events relevant to `docker-build` plus the `force_full_pipeline` input. The real `validate.yml` keeps its full trigger surface — `pull_request_target` (the cascade trigger, [ADR-021](../src/adr/021-pull-request-target-trigger-pattern.md)), the `paths-ignore` lists, and its current `workflow_dispatch` inputs (`post_init`, `initialization_complete`). The `force_full_pipeline` input is added by **W13** (not W5a), **alongside** those existing inputs; it does not replace them.
 
 The `docker-build` job itself adds **no additional `if:` guard** beyond `needs.java-build.outputs.build_result == 'success'`. It runs on every qualifying event — including external-fork pull requests — because it performs a validate-only build with no secrets and no registry push.
 
@@ -119,7 +119,7 @@ When `push: 'true'` (companion `docker-push` job):
 |-------------|-------------|
 | `:sha-<short-sha>` | Every push; immutable human-browsable identifier |
 | `:<branch>-snapshot` | Push to a protected branch (`main`, `fork_integration`, `fork_upstream`); matches Maven `-Drevision=${branch}-SNAPSHOT` |
-| `:<version>` (e.g. `:v1.2.3`) | Tag push created by Release Please |
+| `:<version>` (e.g. `:v1.2.3`) | Applied by `release.yml` (W7) on the Release Please tag push — **not** by `docker-push` (`validate.yml` does not run on tag pushes) |
 
 Tags are documentation artefacts. Deployment always uses the digest reference.
 
@@ -194,7 +194,7 @@ See the [parent design doc §5.5](./cicd-build-deploy-test-design.md#55-workflow
 
 ### release.yml
 
-The companion `docker-push` job pushes a `:<version>` tag when a Release Please tag is pushed (e.g. `:v1.2.3`). The `release.yml` workflow re-tags the existing image with the semver at release time (W7); it does not re-deploy.
+On a Release Please tag push, the `:<version>` tag (e.g. `:v1.2.3`) is applied by `release.yml` (W7), which re-tags the existing image with the semver. `validate.yml`/`docker-push` does not run on tag pushes, and `release.yml` does not re-deploy.
 
 ### ghcr-retention.yml
 
