@@ -1,5 +1,8 @@
 # ADR-032: CI/CD Deploy Loop via Suspended Flux
 
+## Status
+**Accepted** - 2026-06-01
+
 ## Context
 
 The OSDU SPI engineering system (three-branch fork model — [ADR-001](001-three-branch-strategy.md)) produces validated Maven artifacts but no container images, deployments, or integration-test signal. The runtime infrastructure (`osdu-spi-stack`) uses Flux GitOps for initial cluster provisioning and baseline state.
