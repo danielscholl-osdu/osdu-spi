@@ -1,6 +1,6 @@
 # Docker Build Workflow Specification
 
-This document specifies the docker build stage (`docker-build` job in `validate.yml`) that provides container image validation for every workflow event and trusted image publication for internal pushes and pull requests.
+This document specifies the docker build stage in `validate.yml`: the validate-only `docker-build` job (container-image validation on every workflow event) and its companion `docker-push` job (trusted GHCR publication for internal pushes and pull requests).
 
 ## Overview
 
@@ -13,7 +13,7 @@ The docker-build job runs inside `validate.yml` after the `java-build` job succe
 **References**:
 - [ADR-033: GHCR as Service Image Registry](../src/adr/033-ghcr-as-service-image-registry.md)
 - [ADR-035: Azure-Only Maven Profile](../src/adr/035-azure-only-maven-profile.md)
-- [ADR-036: Workflow Trust Boundaries](../src/adr/036-workflow-trust-boundaries.md) *(ADR authored in wave 1; `if:`-clause enforcement lands in W5b/Deploy PR)*
+- [ADR-036: Workflow Trust Boundaries](../src/adr/036-workflow-trust-boundaries.md) *(ADR authored in wave 1; the `docker-push` guard lands in W5a/Build PR, the `deploy`/`integration-test` replications in W5b/Deploy PR)*
 
 **Key Benefits**:
 - **Universal Dockerfile Validation**: Compile check runs on every event, including external-fork PRs, so contributors get early feedback before any merge
@@ -84,7 +84,7 @@ permissions:
 
 ## Composite Action Contract
 
-The job delegates to `.github/actions/docker-build/action.yml`.
+The job delegates to the `.github/actions/docker-build/action.yml` composite action — authored by W2/#3. It does not yet exist in this template repo; this section specifies the contract it must implement.
 
 ### Inputs
 
@@ -117,7 +117,7 @@ When `push: 'true'` (companion `docker-push` job):
 
 | Tag pattern | When applied |
 |-------------|-------------|
-| `:sha-<short-sha>` | Every push; immutable human-browseable identifier |
+| `:sha-<short-sha>` | Every push; immutable human-browsable identifier |
 | `:<branch>-snapshot` | Push to a protected branch (`main`, `fork_integration`, `fork_upstream`); matches Maven `-Drevision=${branch}-SNAPSHOT` |
 | `:<version>` (e.g. `:v1.2.3`) | Tag push created by Release Please |
 
@@ -164,7 +164,7 @@ graph TD
 
 ## Trust Boundary
 
-> **`docker-build` is exempt.** It runs on every event type with `permissions: contents: read` only. There is no cluster credential, no `packages: write`, and no Azure login. The attack surface from running an untrusted Dockerfile is a wasted compute minute, not a credential leak.
+> **`docker-build` is exempt.** It runs on every event type with `permissions: contents: read` only. The only token present is the read-only `GITHUB_TOKEN` — no `packages: write`, no Azure login, no cluster credential. The attack surface from running an untrusted Dockerfile is a wasted compute minute, not exposure of a push or cluster credential.
 
 The §5.5 trust-boundary `if:` clause (ADR-036) applies to the **`docker-push`** job and to the downstream `deploy` / `integration-test` jobs. **`docker-push` carries `packages: write`, so its guard lands in W5a (Build PR) together with the `docker-push` job itself** — it protects GHCR write access against untrusted events (`pull_request_target`, external-fork PRs, `dependabot[bot]`), independent of any cluster credential. Only the `deploy` / `integration-test` *replications* of the clause are deferred to W5b (Deploy PR), when the cluster federated identity they additionally protect comes into existence.
 
@@ -198,7 +198,7 @@ The companion `docker-push` job pushes a `:<version>` tag when a Release Please 
 
 ### ghcr-retention.yml
 
-A scheduled `ghcr-retention.yml` workflow (W11) prunes old `:sha-*` and `:<branch>-snapshot` tags from GHCR to control package storage growth. The `docker-build` action emits `image_tags` to make pruning logic straightforward.
+A scheduled `ghcr-retention.yml` workflow (W11) prunes old `:sha-*` and `:<branch>-snapshot` tags from GHCR to control package storage growth. The `docker-push` job (`push: 'true'`) emits `image_tags` to make pruning logic straightforward; the validate-only `docker-build` job emits no outputs.
 
 ### Deploy + integration-test (Deploy PR)
 
@@ -224,7 +224,7 @@ The action defaults to `devops/azure/Dockerfile`. Service forks follow the conve
 - [Parent design doc: OSDU SPI CI/CD Build, Deploy, Integration Test](./cicd-build-deploy-test-design.md) — §5.1 (Docker Build), §9.5.A (Build PR scope)
 - [ADR-033: GHCR as Service Image Registry](../src/adr/033-ghcr-as-service-image-registry.md)
 - [ADR-035: Azure-Only Maven Profile](../src/adr/035-azure-only-maven-profile.md)
-- [ADR-036: Workflow Trust Boundaries](../src/adr/036-workflow-trust-boundaries.md) *(ADR authored in wave 1; `if:`-clause enforcement lands in W5b/Deploy PR)*
+- [ADR-036: Workflow Trust Boundaries](../src/adr/036-workflow-trust-boundaries.md) *(ADR authored in wave 1; the `docker-push` guard lands in W5a/Build PR, the `deploy`/`integration-test` replications in W5b/Deploy PR)*
 - [Build Workflow Specification](./build-workflow-spec.md)
 - [Validate Workflow Specification](./validate-workflow-spec.md)
 - [Release Workflow Specification](./release-workflow-spec.md)
