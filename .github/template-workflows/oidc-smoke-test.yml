@@ -65,7 +65,7 @@ jobs:
         run: |
           echo "::error::azure/login failed for subject: ${{ steps.subject.outputs.subject }}"
           echo "::error::Verify that a federated credential with exactly this subject exists on"
-          echo "::error::the application (App Registration) or managed identity '${{ vars.AZURE_CLIENT_ID }}'"
+          echo "::error::the user-assigned managed identity (client-id '${{ vars.AZURE_CLIENT_ID }}')"
           echo "::error::in tenant '${{ vars.AZURE_TENANT_ID }}'."
           echo "::error::If you just changed federated credentials, wait ~30 s and retry."
           echo "::error::To add a missing credential:"

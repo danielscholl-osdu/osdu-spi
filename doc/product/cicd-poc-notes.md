@@ -100,7 +100,8 @@ Actions variable / secret **name** that carries them; values are not committed.
   4. On failure, the workflow prints the exact subject claim that needs to be registered — use
      that string to add or correct the federated credential in the Azure portal or via the CLI.
   Required repo-level Actions variables: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-  `AZURE_SUBSCRIPTION_ID`, `AKS_RESOURCE_GROUP`, `AKS_CLUSTER_NAME`.
+  `AZURE_SUBSCRIPTION_ID`, `AKS_RESOURCE_GROUP`, `AKS_CLUSTER_NAME`. Optional:
+  `K8S_NAMESPACE` (namespace the workflow checks; defaults to `osdu`).
   Issuer is captured as `AKS_OIDC_ISSUER_URL` (value stored outside git).
 
 ## Flux steady state — action taken
