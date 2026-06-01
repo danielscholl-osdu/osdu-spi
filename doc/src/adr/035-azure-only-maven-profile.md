@@ -1,5 +1,8 @@
 # ADR-035: Azure-Only Maven Profile Restriction
 
+## Status
+**Accepted** - 2026-06-01
+
 ## Context
 
 - CI currently has the ability to build multiple cloud-provider Maven profiles (Azure, AWS, IBM, GC), but this repository is focused on Azure SPI delivery.
@@ -29,4 +32,4 @@
 
 ---
 
-:material-arrow-up: [Catalog](index.md)
+[← ADR-031](031-template-sync-duplicate-prevention.md) | :material-arrow-up: [Catalog](index.md)
