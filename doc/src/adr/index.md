@@ -113,6 +113,7 @@ Technical patterns and infrastructure for workflow implementation:
 | [028](028-workflow-script-extraction-pattern.md) | **Workflow Script Extraction** | :material-minus: Medium | :material-check-circle: Accepted |
 | [029](029-github-app-authentication-strategy.md) | **GitHub App Authentication** | :material-trending-up: High | :material-check-circle: Accepted |
 | [030](030-codeql-summary-job-pattern.md) | **CodeQL Summary Job Pattern** | :material-trending-up: High | :material-check-circle: Accepted |
+| [036](036-workflow-trust-boundaries.md) | **Workflow Trust Boundaries for CI/CD** | :material-trending-up: High | :material-check-circle: Accepted |
 
 ## Navigation Tips
 

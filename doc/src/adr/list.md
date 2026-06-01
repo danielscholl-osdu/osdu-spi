@@ -39,6 +39,7 @@ Architecture Decision Records for Fork Management Template
 | 029 | GitHub App Authentication Strategy         | [ADR-029](029-github-app-authentication-strategy.md) |
 | 030 | CodeQL Summary Job Pattern                 | [ADR-030](030-codeql-summary-job-pattern.md) |
 | 031 | Template Sync Duplicate Prevention Pattern | [ADR-031](031-template-sync-duplicate-prevention.md) |
+| 036 | Workflow Trust Boundaries for CI/CD        | [ADR-036](036-workflow-trust-boundaries.md) |
 
 ## Overview
 
@@ -201,3 +202,8 @@ These Architecture Decision Records document the key design choices made in the 
 - Branch reuse with force-push when template advances
 - Eliminates daily accumulation of open template-sync PRs
 
+**Workflow Trust Boundaries for CI/CD (ADR-036)**
+- Credential-bearing jobs (`docker-push`, `deploy`, `integration-test`) are blocked from untrusted event contexts
+- Explicit trust matrix governs `push`, internal/external PR, `pull_request_target`, dependabot, dispatch, tags, and cascade pushes
+- Canonical `if:` gate excludes `dependabot[bot]`, excludes `pull_request_target`, and permits only internal PR heads
+- External-fork PR deploy/test limitation is accepted to protect cluster credentials
