@@ -11,7 +11,7 @@ The docker-build job runs inside `validate.yml` after the `java-build` job succe
 ## Architecture Integration
 
 **References**:
-- [ADR-033: GHCR Image Strategy](../src/adr/033-ghcr-image-strategy.md)
+- [ADR-033: GHCR as Service Image Registry](../src/adr/033-ghcr-as-service-image-registry.md)
 - [ADR-035: Azure-Only Maven Profile](../src/adr/035-azure-only-maven-profile.md)
 - [ADR-036: Workflow Trust Boundaries](../src/adr/036-workflow-trust-boundaries.md) *(ships with Deploy PR — forward reference)*
 
@@ -218,7 +218,7 @@ The action defaults to `devops/azure/Dockerfile`. Service forks follow the conve
 ## References
 
 - [Parent design doc: OSDU SPI CI/CD Build, Deploy, Integration Test](./cicd-build-deploy-test-design.md) — §5.1 (Docker Build), §9.5.A (Build PR scope)
-- [ADR-033: GHCR Image Strategy](../src/adr/033-ghcr-image-strategy.md)
+- [ADR-033: GHCR as Service Image Registry](../src/adr/033-ghcr-as-service-image-registry.md)
 - [ADR-035: Azure-Only Maven Profile](../src/adr/035-azure-only-maven-profile.md)
 - [ADR-036: Workflow Trust Boundaries](../src/adr/036-workflow-trust-boundaries.md) *(ships with Deploy PR)*
 - [Build Workflow Specification](./build-workflow-spec.md)
