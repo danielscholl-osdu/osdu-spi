@@ -35,6 +35,51 @@ jobs:
     name: "🔐 OIDC Federated Credential Smoke Test"
     runs-on: ubuntu-latest
     steps:
+      - name: "Preflight — verify required secrets and variables"
+        env:
+          SECRET_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          SECRET_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          SECRET_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          VAR_AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+          VAR_AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+          VAR_AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          VAR_AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          missing=0
+
+          if [ -z "$SECRET_CLIENT_ID" ]; then
+            echo "::error::Required secret AZURE_CLIENT_ID is not set."
+            missing=1
+          fi
+          if [ -z "$SECRET_TENANT_ID" ]; then
+            echo "::error::Required secret AZURE_TENANT_ID is not set."
+            missing=1
+          fi
+          if [ -z "$SECRET_SUBSCRIPTION_ID" ]; then
+            echo "::error::Required secret AZURE_SUBSCRIPTION_ID is not set."
+            missing=1
+          fi
+          if [ -z "$VAR_AKS_RESOURCE_GROUP" ]; then
+            echo "::error::Required variable AKS_RESOURCE_GROUP is not set."
+            missing=1
+          fi
+          if [ -z "$VAR_AKS_CLUSTER_NAME" ]; then
+            echo "::error::Required variable AKS_CLUSTER_NAME is not set."
+            missing=1
+          fi
+
+          if [ -z "$VAR_AZURE_CLIENT_ID" ]; then
+            echo "::warning::Recommended variable AZURE_CLIENT_ID is not set — login-failure diagnostics will show a placeholder."
+          fi
+          if [ -z "$VAR_AZURE_TENANT_ID" ]; then
+            echo "::warning::Recommended variable AZURE_TENANT_ID is not set — login-failure diagnostics will show a placeholder."
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::One or more required secrets/variables are missing. Configure them before re-running."
+            exit 1
+          fi
+
       - name: "Compute expected OIDC subject claim"
         id: subject
         run: |
@@ -65,8 +110,8 @@ jobs:
         run: |
           echo "::error::azure/login failed for subject: ${{ steps.subject.outputs.subject }}"
           echo "::error::Verify that a federated credential with exactly this subject exists on"
-          echo "::error::the user-assigned managed identity (client-id '${{ vars.AZURE_CLIENT_ID }}')"
-          echo "::error::in tenant '${{ vars.AZURE_TENANT_ID }}'."
+          echo "::error::the user-assigned managed identity (client-id '${{ vars.AZURE_CLIENT_ID || '<AZURE_CLIENT_ID variable not set>' }}')"
+          echo "::error::in tenant '${{ vars.AZURE_TENANT_ID || '<AZURE_TENANT_ID variable not set>' }}'."
           echo "::error::If you just changed federated credentials, wait ~30 s and retry."
           echo "::error::To add a missing credential:"
           echo "::error::  az identity federated-credential create ... --subject '${{ steps.subject.outputs.subject }}'"
