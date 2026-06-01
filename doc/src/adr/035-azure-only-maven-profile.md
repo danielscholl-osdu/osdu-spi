@@ -9,7 +9,7 @@
 ## Decision
 
 - The Azure profile is selected per service through a per-service repository variable: `MAVEN_PROFILE` (e.g. `partition-azure`).
-- When `MAVEN_PROFILE` is set, CI builds **only** that profile (`-P <service>-azure`); SPI service forks set it so their CI signal is Azure-only.
+- When `MAVEN_PROFILE` is set, CI builds **only** that profile (the value of `MAVEN_PROFILE`, e.g. `partition-azure`); SPI service forks set it so their CI signal is Azure-only.
 - The workflow appends `-P <MAVEN_PROFILE>` only when the variable is set. When it is unset, the build behaves as before (no profile filter) so existing forks don't break before they adopt the variable — the guard must avoid emitting a bare `-P` with no profile name.
 
 ## Consequences

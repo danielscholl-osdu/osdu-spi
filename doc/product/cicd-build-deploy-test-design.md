@@ -500,8 +500,8 @@ The new jobs hold a federated identity with `Azure Kubernetes Service Cluster Us
 | `pull_request` from internal branch (head repo == base repo) | PR HEAD | Yes | **Yes** |
 | `pull_request` from external fork | PR HEAD | No (GH default) | No — would fail at `azure/login` anyway, but explicitly skipped to avoid noise |
 | `pull_request_target` (base-repo context) | PR HEAD (checked out via explicit ref) | Yes | **No** — too dangerous; would let a PR exfiltrate the federated identity by running arbitrary code in a workflow that has secret access |
-| `dependabot[bot]` PR | PR HEAD | Limited (`secrets.DEPENDABOT_SECRETS`) | No — dependabot-validation.yml is the dependency-update path |
-| `workflow_dispatch` | Repo HEAD at chosen ref | Yes | Yes (manual gate is the operator) |
+| `dependabot[bot]` PR | PR HEAD | Limited (Dependabot secrets scope only) | No — dependabot-validation.yml is the dependency-update path |
+| `workflow_dispatch` | Repo HEAD at chosen ref | Yes | Yes, but only when `inputs.force_full_pipeline == true` (operator is the manual gate) |
 | Tag push (release-please) | Tagged commit (already in `main`) | Yes | **No** — tag pushes go through `release.yml`, NOT `validate.yml`. `release.yml` only re-tags the existing image with the semver (W7) via `GITHUB_TOKEN` to GHCR — no `azure/login`; it does not re-deploy, since deploy already ran on the merge-to-main that produced the tagged commit. No tag-scoped Azure federated subject is exercised today; `refs/tags/*` is provisioned only if a future registry pivot (§7.4) moves image auth to OIDC. |
 | Cascade workflow push to `fork_integration` | Cascade-resolved tree | Yes | Yes — see §5.6 |
 
@@ -571,7 +571,7 @@ Steps:
    | Push to / PR to any branch | `repo:${ORG}/${SERVICE}:ref:refs/heads/*` (wildcard) | Always |
    | Pull request events | `repo:${ORG}/${SERVICE}:pull_request` | Always |
    | Release-please tag push (`v*`) | `repo:${ORG}/${SERVICE}:ref:refs/tags/*` | Only if registry auth moves to OIDC (§7.4 ACR); GHCR re-tag uses `GITHUB_TOKEN`, so not needed today |
-   | Environment-scoped (if `environments:` used for gating) | `repo:${ORG}/${SERVICE}:environment:<env-name>` | Only if `environments:` gating is adopted |
+   | Environment-scoped (if the `environment:` job key is used for gating) | `repo:${ORG}/${SERVICE}:environment:<env-name>` | Only if `environment:` gating is adopted |
 
    Wildcard subjects require Azure AD to be configured to accept the wildcard pattern (controlled by an Entra ID feature flag; if unavailable, enumerate explicit refs `main`, `fork_integration`, `fork_upstream`).
    ```

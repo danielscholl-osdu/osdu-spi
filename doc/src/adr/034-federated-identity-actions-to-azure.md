@@ -14,7 +14,7 @@
   - `repo:${ORG}/${SERVICE}:pull_request` (internal PR events)
 - Two further subjects are **not** granted by default (least privilege) — provision each only when it is actually exercised:
   - `repo:${ORG}/${SERVICE}:ref:refs/tags/*` — only if image push/retag moves to OIDC registry auth (the §7.4 ACR fallback). With public GHCR (ADR-033) the release re-tag uses `GITHUB_TOKEN`, so no tag-scoped Azure subject is used today.
-  - `repo:${ORG}/${SERVICE}:environment:<name>` — only if the deploy job adopts `environments:` gating.
+  - `repo:${ORG}/${SERVICE}:environment:<name>` — only if the deploy job adopts the `environment:` job key for gating.
 - Use three repo secrets as the handoff contract from onboarding to workflows — `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` (`AZURE_CLIENT_ID` is also exposed as a repo variable for use in `if:` expressions and operator-facing diagnostics).
 - Keep the ~20-step onboarding automated, split on the credential boundary:
   - **Cluster side (`osdu-spi-stack`, `spi onboard`)**: identity creation, federated credentials, AKS/KV RBAC, and the Kubernetes RoleBinding; writes the `AZURE_*` secrets to the target repo.

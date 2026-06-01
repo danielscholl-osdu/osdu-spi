@@ -18,8 +18,8 @@ Enforce a single trust-boundary model for credential-bearing jobs, per the event
 | `pull_request` from internal branch (head repo == base repo) | PR HEAD | Yes | **Yes** |
 | `pull_request` from external fork | PR HEAD | No (GH default) | No — would fail at `azure/login` anyway, but explicitly skipped to avoid noise |
 | `pull_request_target` (base-repo context) | PR HEAD (checked out via explicit ref) | Yes | **No** — too dangerous; would let a PR exfiltrate the federated identity by running arbitrary code in a workflow with secret access |
-| `dependabot[bot]` PR | PR HEAD | Limited (`secrets.DEPENDABOT_SECRETS`) | No — `dependabot-validation.yml` is the dependency-update path |
-| `workflow_dispatch` | Repo HEAD at chosen ref | Yes | Yes (the manual gate is the operator) |
+| `dependabot[bot]` PR | PR HEAD | Limited (Dependabot secrets scope only) | No — `dependabot-validation.yml` is the dependency-update path |
+| `workflow_dispatch` | Repo HEAD at chosen ref | Yes | **Yes**, but only when `inputs.force_full_pipeline == true` (the operator is the manual gate) |
 | Tag push (release-please) | Tagged commit (already in `main`) | Yes | **No** — tag pushes go through `release.yml`, not `validate.yml`; `release.yml` only re-tags the existing image with the semver (via `GITHUB_TOKEN` to GHCR — no `azure/login`) and does not re-deploy. No tag-scoped Azure federated subject is exercised today; `refs/tags/*` is provisioned only if a future registry pivot (§7.4) moves image auth to OIDC. |
 | Cascade workflow push to `fork_integration` | Cascade-resolved tree | Yes | Yes |
 

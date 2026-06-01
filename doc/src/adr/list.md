@@ -219,11 +219,11 @@ These Architecture Decision Records document the key design choices made in the 
 
 **Federated Identity for Actions to Azure (ADR-034)**
 - Per-service User-Assigned Managed Identity + GitHub OIDC replaces static `AZURE_CREDENTIALS`
-- Required federated subjects: branches wildcard, `pull_request`, and tags wildcard
+- Required federated subjects: branches wildcard + `pull_request`; the tags wildcard is provisioned only if registry auth later moves to OIDC (least privilege)
 - Onboarding split at the credential boundary: `spi onboard` (cluster IAM/RBAC) + `init.yml` extension (fork setup)
 
 **Azure-Only Maven Profile Restriction (ADR-035)**
-- CI builds only `-P <service>-azure`; per-service repo variable `MAVEN_PROFILE` is the control point
+- CI builds only the profile named by the per-service `MAVEN_PROFILE` variable (e.g. `partition-azure`); unset leaves the build unchanged
 - Faster, Azure-relevant CI signal; non-Azure provider regressions are intentionally out of the default path
 
 **Workflow Trust Boundaries for CI/CD (ADR-036)**
