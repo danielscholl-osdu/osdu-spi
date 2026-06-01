@@ -78,7 +78,7 @@ permissions:
           org: ${{ github.repository_owner }}
 ```
 
-> **Note:** action references in this excerpt are shown by tag for readability. In the real `validate.yml`, pin every third-party action to a full commit SHA with a `# vX.Y.Z` comment (repo convention), and confirm the pinned major versions exist (`actions/download-artifact` current major is v4, not v5).
+> **Note:** action references in this excerpt are shown by tag for readability. In the real `validate.yml`, pin every third-party action to a full commit SHA with a `# vX.Y.Z` comment (repo convention).
 
 ## Composite Action Contract
 
