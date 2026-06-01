@@ -74,6 +74,7 @@ Build architecture, dependency management, and documentation:
 | [025](025-java-maven-build-architecture.md) | **Java/Maven Build Architecture** | :material-trending-up: High | :material-check-circle: Accepted |
 | [026](026-dependabot-security-update-strategy.md) | **Dependabot Security Updates** | :material-minus: Medium | :material-check-circle: Accepted |
 | [027](027-documentation-generation-strategy.md) | **Documentation Generation** | :material-minus: Medium | :material-check-circle: Accepted |
+| [033](033-ghcr-as-service-image-registry.md) | **GHCR as Service Image Registry** | :material-minus: Medium | :material-check-circle: Accepted |
 
 ### :material-package-variant: Release Management
 

@@ -39,6 +39,7 @@ Architecture Decision Records for Fork Management Template
 | 029 | GitHub App Authentication Strategy         | [ADR-029](029-github-app-authentication-strategy.md) |
 | 030 | CodeQL Summary Job Pattern                 | [ADR-030](030-codeql-summary-job-pattern.md) |
 | 031 | Template Sync Duplicate Prevention Pattern | [ADR-031](031-template-sync-duplicate-prevention.md) |
+| 033 | GHCR as Service Image Registry             | [ADR-033](033-ghcr-as-service-image-registry.md) |
 
 ## Overview
 
@@ -201,3 +202,8 @@ These Architecture Decision Records document the key design choices made in the 
 - Branch reuse with force-push when template advances
 - Eliminates daily accumulation of open template-sync PRs
 
+**GHCR as Service Image Registry (ADR-033)**
+- Public GHCR selected for SPI service CI/test artifacts consumed by `spi-stack` AKS
+- Consistent with observed Azure GitHub precedent for tooling/CI containers
+- MCR migration deferred; ACR/MCR swap localized to visibility helper integration points
+- Private GHCR fallback rejected due to broader `imagePullSecret` operational touch
