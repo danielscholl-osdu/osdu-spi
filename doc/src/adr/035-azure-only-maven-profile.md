@@ -2,7 +2,7 @@
 
 ## Context
 
-- Forked OSDU services carry multiple cloud-provider Maven profiles (Azure, AWS, IBM, GC, Core+, GC-Quarkus). Only Azure is relevant to SPI work.
+- Forked OSDU services carry multiple cloud-provider Maven profiles (Azure, AWS, IBM, GC, Core+, GC-Quarkus), built via the standard Java/Maven architecture ([ADR-025](025-java-maven-build-architecture.md)). Only Azure is relevant to SPI work.
 - Building and unit-testing the non-Azure profiles in every SPI CI run is wasted CPU and irrelevant signal.
 - Each service needs a per-repository control point so CI selects only the profile that matters for that fork.
 
@@ -26,10 +26,6 @@
 ## Alternatives Considered
 
 - **Continue building all provider profiles in every CI run** — rejected: higher runtime/cost and low relevance to Azure-focused delivery.
-
-## Related
-
-- [ADR-025](025-java-maven-build-architecture.md) — the Java/Maven build architecture this profile restriction narrows.
 
 ---
 

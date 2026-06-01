@@ -3,7 +3,7 @@
 ## Context
 
 - Deploy and integration-test workflows need authenticated access to Azure (AKS + Key Vault).
-- Static `AZURE_CREDENTIALS` JSON secrets are long-lived credentials and a security risk.
+- Static `AZURE_CREDENTIALS` JSON secrets are long-lived credentials and a security risk — the same no-long-lived-credentials principle that replaced PATs with GitHub App tokens for in-repo automation ([ADR-029](029-github-app-authentication-strategy.md)).
 - CI credentials must be isolated per service fork to bound blast radius.
 
 ## Decision
@@ -31,10 +31,6 @@
 
 - **Keep static `AZURE_CREDENTIALS` secrets** — rejected: long-lived secrets and a larger compromise surface.
 - **One shared identity for all service forks** — rejected: poor blast-radius isolation and weaker per-service boundary control.
-
-## Related
-
-- [ADR-029](029-github-app-authentication-strategy.md) — the in-repo-automation counterpart (short-lived GitHub App tokens replacing PATs). ADR-034 is the Azure-access counterpart of the same "no long-lived credentials" principle.
 
 ---
 
