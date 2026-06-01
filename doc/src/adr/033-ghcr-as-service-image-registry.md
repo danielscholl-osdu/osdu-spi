@@ -1,5 +1,8 @@
 # ADR-033: GHCR as Service Image Registry
 
+## Status
+**Accepted** - 2026-06-01
+
 ## Context
 
 - SPI service images are CI test artifacts consumed by the shared `spi-stack` AKS cluster.
