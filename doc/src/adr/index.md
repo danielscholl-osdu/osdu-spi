@@ -75,6 +75,20 @@ Build architecture, dependency management, and documentation:
 | [026](026-dependabot-security-update-strategy.md) | **Dependabot Security Updates** | :material-minus: Medium | :material-check-circle: Accepted |
 | [027](027-documentation-generation-strategy.md) | **Documentation Generation** | :material-minus: Medium | :material-check-circle: Accepted |
 
+### :material-rocket-launch: CI/CD & Deployment
+
+*"How do services get built, deployed, and tested per PR?"*
+
+Decisions for the container-image build, cluster deploy, and integration-test pipeline:
+
+| ADR | Decision | Impact | Status |
+|-----|----------|--------|--------|
+| [032](032-cicd-deploy-loop-via-suspended-flux.md) | **CI/CD Deploy Loop via Suspended Flux** | :material-trending-up: High | :material-check-circle: Accepted |
+| [033](033-ghcr-as-service-image-registry.md) | **GHCR as Service Image Registry** | :material-minus: Medium | :material-check-circle: Accepted |
+| [034](034-federated-identity-actions-to-azure.md) | **Federated Identity for Actions to Azure** | :material-trending-up: High | :material-check-circle: Accepted |
+| [035](035-azure-only-maven-profile.md) | **Azure-Only Maven Profile Restriction** | :material-minus: Medium | :material-check-circle: Accepted |
+| [036](036-workflow-trust-boundaries.md) | **Workflow Trust Boundaries for CI/CD** | :material-trending-up: High | :material-check-circle: Accepted |
+
 ### :material-package-variant: Release Management
 
 *"How do releases get created and published?"*
