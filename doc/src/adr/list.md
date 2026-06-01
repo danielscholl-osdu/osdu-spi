@@ -39,6 +39,7 @@ Architecture Decision Records for Fork Management Template
 | 029 | GitHub App Authentication Strategy         | [ADR-029](029-github-app-authentication-strategy.md) |
 | 030 | CodeQL Summary Job Pattern                 | [ADR-030](030-codeql-summary-job-pattern.md) |
 | 031 | Template Sync Duplicate Prevention Pattern | [ADR-031](031-template-sync-duplicate-prevention.md) |
+| 035 | Azure-Only Maven Profile Restriction       | [ADR-035](035-azure-only-maven-profile.md) |
 
 ## Overview
 
@@ -201,3 +202,8 @@ These Architecture Decision Records document the key design choices made in the 
 - Branch reuse with force-push when template advances
 - Eliminates daily accumulation of open template-sync PRs
 
+**Azure-Only Maven Profile Restriction (ADR-035)**
+- CI builds only `-P <service>-azure` in standard SPI workflows
+- Per-service repository variable `MAVEN_PROFILE` controls selected Maven profile
+- Improves CI efficiency for Azure delivery scope
+- Reduces default CI signal for non-Azure provider profile breakage
