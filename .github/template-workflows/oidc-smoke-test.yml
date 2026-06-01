@@ -49,11 +49,13 @@ jobs:
 
       - name: "Azure Login (OIDC federated credential)"
         id: az_login
-        uses: azure/login@a457da9a9e83985fb8c9b1ee35f958765c93aef0  # v2.3.0
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5  # v2.3.0
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # client-id/tenant-id/subscription-id are non-secret identifiers; read them from repo
+          # *variables* so the failure-guidance step below can echo the client-id (a secret is masked).
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: "On login failure — print subject claim guidance"
         if: failure() && steps.az_login.outcome == 'failure'
@@ -66,13 +68,20 @@ jobs:
           echo "::error::To add a missing credential:"
           echo "::error::  az identity federated-credential create ... --subject '${{ steps.subject.outputs.subject }}'"
 
-      - name: "Get AKS credentials"
+      - name: "Get AKS credentials (Entra-only cluster — convert kubeconfig via kubelogin)"
         run: |
+          # The shared cluster runs with disableLocalAccounts=true + Azure RBAC (Phase 0 gate 0b),
+          # so a plain kubeconfig cannot authenticate non-interactively. Install kubelogin (and
+          # kubectl) and convert the kubeconfig to reuse the azure/login federated identity —
+          # otherwise kubectl would hang on an interactive device-code prompt in CI.
+          az aks install-cli
           az aks get-credentials \
             --resource-group "${{ vars.AKS_RESOURCE_GROUP }}" \
             --name "${{ vars.AKS_CLUSTER_NAME }}" \
             --overwrite-existing
+          kubelogin convert-kubeconfig -l azurecli
 
-      - name: "Verify OSDU deployments"
+      - name: "Verify service namespace is reachable"
         run: |
-          kubectl get deployments -n osdu
+          NS="${{ vars.K8S_NAMESPACE }}"
+          kubectl get deployments -n "${NS:-osdu}"

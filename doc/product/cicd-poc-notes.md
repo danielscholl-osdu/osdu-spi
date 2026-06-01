@@ -86,7 +86,7 @@ Actions variable / secret **name** that carries them; values are not committed.
   acceptance-test suite.
 - **Resolution:** Pending — inspect the partition repo's acceptance tests; track separately.
 
-### Step 4a — OIDC smoke test ✅ Workflow available
+### Step 4a — OIDC smoke test ⏳ Workflow available (validation pending on partition)
 
 - **Question:** Does the federated-credential path work for every event subject?
 - **Finding:** `.github/template-workflows/oidc-smoke-test.yml` now exists (sub-issue #11).
