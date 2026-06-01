@@ -22,9 +22,8 @@ The deploy stage applies the newly built image digest to the service deployment,
 
 ## Workflow Configuration
 
-### Triggers
+### validate.yml job chain
 ```yaml
-# validate.yml job chain
 check-initialization -> check-repo-state -> java-build -> docker-push -> deploy
 ```
 

@@ -21,9 +21,8 @@ The integration-test stage validates runtime behavior after deployment, verifies
 
 ## Workflow Configuration
 
-### Triggers
+### validate.yml job chain
 ```yaml
-# validate.yml job chain
 check-initialization -> check-repo-state -> java-build -> docker-push -> deploy -> integration-test
 ```
 
