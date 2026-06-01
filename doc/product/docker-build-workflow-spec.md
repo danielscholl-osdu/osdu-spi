@@ -44,6 +44,8 @@ on:
         default: false
 ```
 
+> **Abbreviated.** This shows only the events relevant to `docker-build` plus the new `force_full_pipeline` input. The real `validate.yml` trigger surface is kept in full — including `pull_request_target` (the cascade trigger, [ADR-021](../src/adr/021-pull-request-target-trigger-pattern.md)), the `paths-ignore` lists, and the existing `workflow_dispatch` inputs. W5a adds `force_full_pipeline` **alongside** the existing triggers; it does not replace them.
+
 The `docker-build` job itself adds **no additional `if:` guard** beyond `needs.java-build.outputs.build_result == 'success'`. It runs on every qualifying event — including external-fork pull requests — because it performs a validate-only build with no secrets and no registry push.
 
 ### Permissions
@@ -160,11 +162,11 @@ graph TD
 | First-time push — package created private | `docker-push` succeeds; downstream deploy fails with `ErrImagePull` | The action attempts an immediate public-visibility flip after push; `init.yml` reconciles visibility for fresh forks; `settings-apply.yml` reconciles for existing forks on schedule |
 | `vars.SERVICE_NAME` not set | `image_name` input is empty; action fails | Run `init.yml` (fresh fork) or the ONBOARD-INIT-A helper (`setup-service-variables.sh`) to populate the variable |
 
-## Trust Boundary (deferred to Deploy PR)
+## Trust Boundary
 
-> **Build PR window:** `docker-build` is unrestricted — it runs on every event type with `permissions: contents: read` only. There is no cluster credential, no `packages: write`, and no Azure login. The attack surface from running an untrusted Dockerfile is a wasted compute minute, not a credential leak.
+> **`docker-build` is exempt.** It runs on every event type with `permissions: contents: read` only. There is no cluster credential, no `packages: write`, and no Azure login. The attack surface from running an untrusted Dockerfile is a wasted compute minute, not a credential leak.
 
-The §5.5 trust-boundary `if:` clause (ADR-036) applies to the **`docker-push`** job and, in the Deploy PR, to the downstream `deploy` and `integration-test` jobs. That clause is introduced in W5b (Deploy PR) because it protects the cluster federated identity, which does not exist until the Deploy PR lands.
+The §5.5 trust-boundary `if:` clause (ADR-036) applies to the **`docker-push`** job and to the downstream `deploy` / `integration-test` jobs. **`docker-push` carries `packages: write`, so its guard lands in W5a (Build PR) together with the `docker-push` job itself** — it protects GHCR write access against untrusted events (`pull_request_target`, external-fork PRs, `dependabot[bot]`), independent of any cluster credential. Only the `deploy` / `integration-test` *replications* of the clause are deferred to W5b (Deploy PR), when the cluster federated identity they additionally protect comes into existence.
 
 **Compact trust-boundary clause (for reference — lives on `docker-push`, not `docker-build`):**
 
