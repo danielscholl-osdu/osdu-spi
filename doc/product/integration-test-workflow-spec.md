@@ -77,6 +77,7 @@ if: |
     needs.java-build.outputs.build_result == 'success' &&
     github.actor != 'dependabot[bot]' &&
     github.event_name != 'pull_request_target' &&
+    github.event_name != 'workflow_dispatch' &&
     (github.event_name != 'pull_request' ||
      github.event.pull_request.head.repo.full_name == github.repository)
   ) || (

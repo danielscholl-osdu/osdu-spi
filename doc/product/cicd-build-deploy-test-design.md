@@ -515,6 +515,7 @@ if: |
     needs.java-build.outputs.build_result == 'success' &&
     github.actor != 'dependabot[bot]' &&
     github.event_name != 'pull_request_target' &&
+    github.event_name != 'workflow_dispatch' &&
     (github.event_name != 'pull_request' ||
      github.event.pull_request.head.repo.full_name == github.repository)
   ) || (
@@ -525,7 +526,7 @@ if: |
 
 The first half is the trust-boundary admission (per the table above). The second half is the W13 manual escape hatch: a `workflow_dispatch` from an operator who has push access to the repo is, by definition, a trusted invocation — and is the only way to force a full pipeline run when `paths-ignore` would otherwise skip the trigger (the canonical case being a template-sync PR whose only changes are under `.github/`). Both halves must be present; omitting the W13 admission means `force_full_pipeline` lands as dead weight.
 
-**Canonical clause — reconciliation (do not weaken).** The implementation jobs (`docker-push` in W5a, `deploy` / `integration-test` in W5b) use the *compact* form given in the implementation plan's W5a/W5b acceptance criteria: `needs.java-build.outputs.build_result == 'success'` plus the three event guards (`github.actor != 'dependabot[bot]'`, `github.event_name != 'pull_request_target'`, internal-PR-only). That compact form is **equivalent** to the expanded clause above: these jobs `needs: [java-build]`, and `java-build` itself `needs: [check-initialization, check-repo-state]` and only emits `build_result == 'success'` when `initialized == 'true' && is_java_repo == 'true'` — so those two conjuncts are already implied and are omitted to keep a single canonical clause. **The compact clause in plan W5a/W5b is authoritative for implementation; this expanded clause and the Appendix A.1 YAML sketches are illustrative.** Agents must reproduce the plan's compact clause verbatim and **must not drop any of the three event guards** (dropping one is the only way to turn this into a credential-exposure path).
+**Canonical clause — reconciliation (do not weaken).** The implementation jobs (`docker-push` in W5a, `deploy` / `integration-test` in W5b) use the *compact* form given in the implementation plan's W5a/W5b acceptance criteria: `needs.java-build.outputs.build_result == 'success'` plus the four event guards (`github.actor != 'dependabot[bot]'`, `github.event_name != 'pull_request_target'`, `github.event_name != 'workflow_dispatch'`, internal-PR-only). That compact form is **equivalent** to the expanded clause above: these jobs `needs: [java-build]`, and `java-build` itself `needs: [check-initialization, check-repo-state]` and only emits `build_result == 'success'` when `initialized == 'true' && is_java_repo == 'true'` — so those two conjuncts are already implied and are omitted to keep a single canonical clause. **The compact clause in plan W5a/W5b is authoritative for implementation; this expanded clause and the Appendix A.1 YAML sketches are illustrative.** Agents must reproduce the plan's compact clause verbatim and **must not drop any of the four event guards** (dropping one is the only way to turn this into a credential-exposure path). The `github.event_name != 'workflow_dispatch'` guard is what keeps a plain manual dispatch (without `force_full_pipeline`) out of the trusted first half — `workflow_dispatch` admits credential-bearing jobs only through the second half.
 
 For external-fork PRs we accept the reduced safety net: maintainers must do the historical "checkout, build, sanity-test locally" before merge. Documented in CONTRIBUTING.
 
@@ -1604,6 +1605,7 @@ Questions that have been resolved by this design pass are listed with their reso
         needs.java-build.outputs.build_result == 'success' &&
         github.actor != 'dependabot[bot]' &&
         github.event_name != 'pull_request_target' &&
+        github.event_name != 'workflow_dispatch' &&
         (github.event_name != 'pull_request' ||
          github.event.pull_request.head.repo.full_name == github.repository)
       ) || (
