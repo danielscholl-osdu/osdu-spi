@@ -399,6 +399,7 @@ Edit `.github/template-workflows/validate.yml` to (a) pass `maven_profile: ${{ v
       needs.java-build.outputs.build_result == 'success' &&
       github.actor != 'dependabot[bot]' &&
       github.event_name != 'pull_request_target' &&
+      github.event_name != 'workflow_dispatch' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
     ) || (
@@ -448,6 +449,7 @@ Edit `.github/template-workflows/validate.yml` to:
       needs.java-build.outputs.build_result == 'success' &&
       github.actor != 'dependabot[bot]' &&
       github.event_name != 'pull_request_target' &&
+      github.event_name != 'workflow_dispatch' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
     ) || (
