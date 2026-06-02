@@ -6,9 +6,9 @@ inputs:
     description: 'Short service name (e.g. partition); set from vars.SERVICE_NAME. Required.'
     required: true
   dockerfile_path:
-    description: 'Path to the Dockerfile relative to the repo root'
+    description: 'Path to the Dockerfile relative to the repo root. Defaults to the canonical Dockerfile the engineering system syncs to every fork (ADR-037).'
     required: false
-    default: 'devops/azure/Dockerfile'
+    default: 'build/Dockerfile'
   build_context:
     description: 'Docker build context directory'
     required: false

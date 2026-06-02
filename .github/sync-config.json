@@ -12,6 +12,11 @@
         "path": ".github/fork-resources",
         "sync_all": true,
         "description": "Fork-specific templates and configuration that get copied during sync updates"
+      },
+      {
+        "path": "build",
+        "sync_all": true,
+        "description": "Canonical service Dockerfile owned by the engineering system, synced to every fork (ADR-037)"
       }
     ],
     "files": [
