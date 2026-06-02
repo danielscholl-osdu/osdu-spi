@@ -72,9 +72,9 @@ runs:
         fi
 
         if [[ "${{ inputs.generate_coverage }}" == "true" ]]; then
-          # Run build with coverage; use 'install' (not 'test') so JARs are packaged into
-          # **/target/*.jar for the build-artifacts upload that docker-build consumes
-          mvn $MAVEN_CLI_OPTS clean install org.jacoco:jacoco-maven-plugin:0.8.11:report
+          # Run build with coverage; use 'package' (not 'test') so JARs land in **/target/*.jar
+          # for the build-artifacts upload, without invoking verify/install side effects
+          mvn $MAVEN_CLI_OPTS clean package org.jacoco:jacoco-maven-plugin:0.8.11:report
           
           # Generate coverage summary
           echo "# Test Coverage Report" >> $GITHUB_STEP_SUMMARY
