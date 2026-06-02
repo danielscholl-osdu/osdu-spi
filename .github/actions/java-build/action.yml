@@ -9,6 +9,9 @@ inputs:
   gitlab_token:
     description: 'GitLab token for Maven authentication'
     required: false
+  maven_profile:
+    description: 'Optional Maven profile to restrict the build (e.g. partition-azure). When empty, all modules build (unchanged behaviour).'
+    required: false
 
 outputs:
   is_java_project:
@@ -56,7 +59,12 @@ runs:
         if [ -f ".mvn/community-maven.settings.xml" ]; then
           MAVEN_CLI_OPTS="$MAVEN_CLI_OPTS --settings=.mvn/community-maven.settings.xml"
         fi
-        
+
+        # Restrict to a single Maven profile when the caller supplies one (ADR-035)
+        if [ -n "${{ inputs.maven_profile }}" ]; then
+          MAVEN_CLI_OPTS="$MAVEN_CLI_OPTS -P ${{ inputs.maven_profile }}"
+        fi
+
         if [[ "${{ inputs.generate_coverage }}" == "true" ]]; then
           # Run build with coverage
           mvn $MAVEN_CLI_OPTS clean test org.jacoco:jacoco-maven-plugin:0.8.11:report
