@@ -9,6 +9,9 @@ inputs:
   gitlab_token:
     description: 'GitLab token for Maven authentication'
     required: false
+  maven_profile:
+    description: 'Optional Maven profile(s) to restrict the build (e.g. partition-azure, or a comma-separated list). When empty, all modules build (unchanged behaviour).'
+    required: false
 
 outputs:
   is_java_project:
@@ -56,7 +59,18 @@ runs:
         if [ -f ".mvn/community-maven.settings.xml" ]; then
           MAVEN_CLI_OPTS="$MAVEN_CLI_OPTS --settings=.mvn/community-maven.settings.xml"
         fi
-        
+
+        # Restrict the build to the caller-supplied Maven profile(s) (ADR-035; comma-separated list allowed).
+        # Read from env (not direct interpolation) and validate the whole value (bash =~ anchors
+        # against the entire string, so an embedded newline cannot smuggle in a second option).
+        if [ -n "${MAVEN_PROFILE:-}" ]; then
+          if [[ ! "$MAVEN_PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._,-]*$ ]]; then
+            echo "::error::Invalid maven_profile '${MAVEN_PROFILE}' (allowed characters: A-Z a-z 0-9 . _ , -)"
+            exit 1
+          fi
+          MAVEN_CLI_OPTS="$MAVEN_CLI_OPTS -P $MAVEN_PROFILE"
+        fi
+
         if [[ "${{ inputs.generate_coverage }}" == "true" ]]; then
           # Run build with coverage
           mvn $MAVEN_CLI_OPTS clean test org.jacoco:jacoco-maven-plugin:0.8.11:report
@@ -74,6 +88,7 @@ runs:
       env:
         MAVEN_OPTS: "-Dmaven.repo.local=$HOME/.m2/repository"
         COMMUNITY_MAVEN_TOKEN: ${{ inputs.gitlab_token }}
+        MAVEN_PROFILE: ${{ inputs.maven_profile }}
 
     - name: "Upload Build Artifacts"
       if: steps.check_pom.outputs.has_pom == 'true'
