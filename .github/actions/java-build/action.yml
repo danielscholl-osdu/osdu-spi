@@ -52,8 +52,11 @@ runs:
       id: build
       shell: bash
       run: |
-        # Set up Maven CLI options
-        MAVEN_CLI_OPTS="--batch-mode -Drevision=${GITHUB_REF_NAME}-SNAPSHOT"
+        # Set up Maven CLI options.
+        # Sanitize the ref for the Maven revision: pull_request refs look like '123/merge', and
+        # '/' is invalid in an artifact version/filename (it would break or nest the packaged JAR).
+        SAFE_REF="$(printf '%s' "${GITHUB_REF_NAME}" | tr -c 'A-Za-z0-9._-' '-')"
+        MAVEN_CLI_OPTS="--batch-mode -Drevision=${SAFE_REF}-SNAPSHOT"
         
         # Add settings file if it exists
         if [ -f ".mvn/community-maven.settings.xml" ]; then
