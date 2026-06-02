@@ -280,6 +280,9 @@ jobs:
         with:
           push: 'false'                       # validates the Dockerfile compiles; no GHCR login/push
           image_name: ${{ vars.SERVICE_NAME }}
+          # JAR built by java-build (ADR-037); SERVICE_TARGET_JAR overrides the <name>-azure convention.
+          build_args: |
+            JAR_FILE=${{ vars.SERVICE_TARGET_JAR || format('provider/{0}-azure/target/*-spring-boot.jar', vars.SERVICE_NAME) }}
 
   docker-push:
     name: "🐳 Docker Push"
@@ -338,6 +341,9 @@ jobs:
           push: 'true'
           image_name: ${{ vars.SERVICE_NAME }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # JAR built by java-build (ADR-037); SERVICE_TARGET_JAR overrides the <name>-azure convention.
+          build_args: |
+            JAR_FILE=${{ vars.SERVICE_TARGET_JAR || format('provider/{0}-azure/target/*-spring-boot.jar', vars.SERVICE_NAME) }}
 
   code-validation:
     name: "✅ Code Quality Checks"

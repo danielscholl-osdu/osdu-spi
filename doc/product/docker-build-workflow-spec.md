@@ -74,10 +74,12 @@ permissions:
       - uses: ./.github/actions/docker-build
         with:
           push: 'false'
-          dockerfile_path: devops/azure/Dockerfile
           image_name: ${{ vars.SERVICE_NAME }}
           registry: ghcr.io
           org: ${{ github.repository_owner }}
+          # dockerfile_path defaults to build/Dockerfile (ADR-037); JAR_FILE points at the java-build artifact
+          build_args: |
+            JAR_FILE=provider/${{ vars.SERVICE_NAME }}-azure/target/*-spring-boot.jar
 ```
 
 > **Note:** action references in this excerpt are shown by tag for readability. In the real `validate.yml`, pin every third-party action to a full commit SHA with a `# vX.Y.Z` comment (repo convention).
@@ -90,7 +92,7 @@ The job delegates to the `.github/actions/docker-build/action.yml` composite act
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `dockerfile_path` | No | `devops/azure/Dockerfile` | Path to the Dockerfile relative to the repo root |
+| `dockerfile_path` | No | `build/Dockerfile` | Path to the Dockerfile relative to the repo root; defaults to the canonical Dockerfile the engineering system syncs to every fork (ADR-037) |
 | `build_context` | No | `.` | Docker build context directory |
 | `image_name` | **Yes** | — | Short service name (e.g. `partition`); set from `vars.SERVICE_NAME` |
 | `registry` | No | `ghcr.io` | Container registry host |
@@ -155,7 +157,8 @@ graph TD
 
 | Failure | Symptom | Resolution |
 |---------|---------|------------|
-| `devops/azure/Dockerfile` missing | Job fails with message pointing at expected path | Add Dockerfile at `devops/azure/Dockerfile`; see POC notes for reference |
+| `build/Dockerfile` missing | Job fails at the Docker build step | The canonical Dockerfile syncs from the template (ADR-037); confirm template-sync delivered `build/Dockerfile` to the fork |
+| `JAR_FILE` glob matches no file | Docker `COPY` fails | The java-build artifact path differs from `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar`; set `vars.SERVICE_TARGET_JAR` to the correct path |
 | JAR artifact missing (java-build skipped or failed) | `docker-build` job is skipped via `needs: java-build` dependency | Fix the java-build failure; docker-build re-runs automatically |
 | GHCR push fails — rate limit or transient network | `docker-push` job fails | Re-run the failed job; GHCR push is idempotent |
 | Image too large (>1 GB) | Warning surfaced in job summary | Not blocking in initial rollout; investigate multi-stage Dockerfile optimisation |
@@ -213,12 +216,13 @@ A scheduled `ghcr-retention.yml` workflow (W11) prunes old `:sha-*` and `:<branc
 |----------|-------|-------------|
 | `SERVICE_NAME` | Per-fork repo variable | Short service name used as the GHCR image name (e.g. `partition`) |
 | `MAVEN_PROFILE` | Per-fork repo variable | Maven profile passed to `java-build`; default `azure` (W1 / ADR-035) |
+| `SERVICE_TARGET_JAR` | Per-fork repo variable (optional) | Overrides the `JAR_FILE` build-arg when a service's JAR is not at `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (ADR-037) |
 
 Both variables are bootstrapped during fork initialisation by the `ONBOARD-INIT-A` helpers (`setup-service-variables.sh`).
 
 ### Dockerfile Location
 
-The action defaults to `devops/azure/Dockerfile`. Service forks follow the convention established in the `partition` reference fork. Override via the `dockerfile_path` input if the fork deviates.
+The action defaults to `build/Dockerfile` — the **canonical Dockerfile the engineering system owns and syncs to every fork** ([ADR-037](../src/adr/037-engineering-system-owns-service-dockerfile.md)). Service forks do not supply their own; the recipe is service-agnostic and `COPY`s the JAR via the `JAR_FILE` build-arg, which `validate.yml` sets to `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (override per service with `vars.SERVICE_TARGET_JAR`). Override `dockerfile_path` only for a service that genuinely needs a bespoke image.
 
 ## References
 

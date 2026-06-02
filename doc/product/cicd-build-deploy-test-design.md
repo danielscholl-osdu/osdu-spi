@@ -63,7 +63,7 @@ The single largest risk-reduction lever is the **sandbox engineering system**: a
 
 **`danielscholl-osdu/partition`** — First SPI service fork. Initialized from `Azure/osdu-spi` template. Contains:
 - Forked partition source (Java multi-module Maven project, multiple cloud providers)
-- `devops/azure/Dockerfile`, `devops/azure/chart/` (legacy, will become irrelevant — single chart in stack)
+- `devops/azure/Dockerfile`, `devops/azure/chart/` (legacy and unused by CI — the canonical `build/Dockerfile` syncs from the template per ADR-037, and a single chart lives in the stack)
 - `partition-acceptance-test/` Maven module (integration tests)
 - `.gitlab-ci.yml` (legacy OSDU upstream CI — reference for what the upstream did, not to be run)
 - Engineering system workflows inherited from osdu-spi template
@@ -210,7 +210,7 @@ For traceability, here are the decisions made during brainstorming that this des
        ▼                                             │ KV-sourced secrets │
   docker-build job (NEW)                             └─────────▲──────────┘
        │                                                       │
-       │ docker build -f devops/azure/Dockerfile               │
+       │ docker build -f build/Dockerfile                      │
        │ docker tag …:<sha> …:<branch>                         │
        │ docker push ghcr.io/<org>/<svc>:…                     │
        ▼                                                       │
@@ -263,7 +263,7 @@ Three identities total per CI run, all stitched through federated credentials. N
 
 **Inputs:**
 - Built JAR artifacts from `java-build` job (already produced by existing workflow)
-- `devops/azure/Dockerfile` from service repo
+- `build/Dockerfile` — the canonical Dockerfile the engineering system syncs to every fork ([ADR-037](../src/adr/037-engineering-system-owns-service-dockerfile.md)); the JAR is copied in via the `JAR_FILE` build-arg
 
 **Outputs:**
 - Image pushed to `ghcr.io/<org>/<service>:sha-<short-sha>` (always — for humans browsing GHCR)
@@ -283,19 +283,19 @@ Three identities total per CI run, all stitched through federated credentials. N
 |----------|------|----------|
 | `docker-build` job | Job block | `template-workflows/validate.yml` only — added after `java-build` (per D12, not in `build.yml`) |
 | `docker-build` composite action | Composite action | `.github/actions/docker-build/action.yml` |
-| Dockerfile | Per-service | `devops/azure/Dockerfile` (already in partition fork) |
+| Dockerfile | Engineering-system canonical, synced to all forks | `build/Dockerfile` (ADR-037) |
 
 **Composite action contract:**
 
 ```
 inputs:
-  dockerfile_path:        default 'devops/azure/Dockerfile'
+  dockerfile_path:        default 'build/Dockerfile'   # canonical, synced to all forks (ADR-037)
   build_context:          default '.'
   image_name:             required (e.g. 'partition')
   registry:               default 'ghcr.io'
   org:                    default '${{ github.repository_owner }}'
   jar_artifact_name:      default 'build-artifacts'
-  build_args:             optional
+  build_args:             optional (JAR_FILE=<java-build JAR path> for the canonical Dockerfile)
 
 outputs:
   image_repository:       full repo path (e.g. 'ghcr.io/<org>/<service>')
@@ -306,7 +306,7 @@ outputs:
 Callers MUST compose the deploy reference as `${image_repository}@${image_digest}`; never pass a tag to deploy.
 
 **Failure modes:**
-- Dockerfile missing → job fails with clear message pointing at `devops/azure/Dockerfile`
+- Dockerfile missing → job fails at the Docker build step; `build/Dockerfile` syncs from the template (ADR-037), so confirm template-sync delivered it. A `JAR_FILE` glob that matches no file fails the `COPY`; set `vars.SERVICE_TARGET_JAR` when the JAR is not at `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar`
 - JAR artifact missing (java-build skipped or failed) → job is skipped (`needs: java-build`)
 - GHCR push fails (rate limit, network) → job fails, retried by re-running workflow
 - Image too large (>1GB) → warning surfaced, not blocking initially
@@ -1063,9 +1063,11 @@ The work is sequenced in five phases, with explicit exit criteria for each.
    ```
    Verify: `provider/partition-azure/target/*-spring-boot.jar` exists and is ~50MB. Capture exact JAR path/filename for the Dockerfile reference.
 
-2. **Containerize:**
+2. **Containerize** (using the canonical `build/Dockerfile`, ADR-037):
    ```
-   docker build -f devops/azure/Dockerfile -t ghcr.io/danielscholl-osdu/partition:poc .
+   docker build -f build/Dockerfile \
+     --build-arg JAR_FILE=provider/partition-azure/target/*-spring-boot.jar \
+     -t ghcr.io/danielscholl-osdu/partition:poc .
    docker run --rm ghcr.io/danielscholl-osdu/partition:poc  # smoke test (port-forward or healthcheck)
    ```
 
@@ -1592,10 +1594,12 @@ Questions that have been resolved by this design pass are listed with their reso
       - uses: ./.github/actions/docker-build
         with:
           push: 'false'    # validates Dockerfile compiles; no GHCR push, no login
-          dockerfile_path: devops/azure/Dockerfile
           image_name: ${{ vars.SERVICE_NAME }}
           registry: ghcr.io
           org: ${{ github.repository_owner }}
+          # dockerfile_path defaults to build/Dockerfile (ADR-037)
+          build_args: |
+            JAR_FILE=provider/${{ vars.SERVICE_NAME }}-azure/target/*-spring-boot.jar
 
   docker-push:
     name: "🐳 Docker Push"
@@ -1629,10 +1633,12 @@ Questions that have been resolved by this design pass are listed with their reso
         uses: ./.github/actions/docker-build
         with:
           push: 'true'
-          dockerfile_path: devops/azure/Dockerfile
           image_name: ${{ vars.SERVICE_NAME }}
           registry: ghcr.io
           org: ${{ github.repository_owner }}
+          # dockerfile_path defaults to build/Dockerfile (ADR-037)
+          build_args: |
+            JAR_FILE=provider/${{ vars.SERVICE_NAME }}-azure/target/*-spring-boot.jar
 
   deploy:
     name: "🚀 Deploy to spi-stack"
@@ -1696,7 +1702,7 @@ Questions that have been resolved by this design pass are listed with their reso
 name: 'Docker Build & Push'
 inputs:
   dockerfile_path:
-    default: 'devops/azure/Dockerfile'
+    default: 'build/Dockerfile'   # canonical, synced to all forks (ADR-037)
   build_context:
     default: '.'
   image_name:

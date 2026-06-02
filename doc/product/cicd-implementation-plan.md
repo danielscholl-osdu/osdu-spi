@@ -367,6 +367,8 @@ First half of the original `W5` slot, scoped to Build PR. Three changes to `vali
 2. **Append the `🐳 Docker Build` job** (validate-only) after `java-build`. Runs on **every event type** — every PR, including external-fork PRs and `pull_request_target`, gets the "your Dockerfile compiles" feedback. **No `packages: write` permission**, no GHCR login, no push. Calls W2's action with `push: 'false'`.
 3. **Append the `🐳 Docker Push` job** after `🐳 Docker Build`. Runs **only on trusted events** (the §5.5 trust clause). Has `packages: write`. Calls W2's action with `push: 'true'` — GHA layer cache makes this build mostly cache hits. Exports `image_repository` + `image_digest` as job outputs for W5b's deploy job in Deploy PR to consume.
 
+Both Docker jobs build the engineering-system's canonical `build/Dockerfile` (the action default per ADR-037) and pass `build_args: JAR_FILE=provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (override via `vars.SERVICE_TARGET_JAR`) so the JAR our `java-build` job produced is the one copied into the image.
+
 **Why two jobs.** Round 4 attempted to gate at the action's `push` input but kept `packages: write` on the same job that runs untrusted Dockerfile builds — a privilege-escalation surface even if push is honored. The two-job split removes the surface: untrusted code only ever runs in a job without `packages: write`. The cost is a second `docker buildx build` invocation on trusted events, but GHA layer cache means the second build is mostly cache hits (~10-20% extra runtime). Per D12, no changes to `build.yml` — build.yml stays full-profile to preserve cross-provider breakage signal.
 
 **Task:**

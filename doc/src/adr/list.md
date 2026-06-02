@@ -44,6 +44,7 @@ Architecture Decision Records for Fork Management Template
 | 034 | Federated Identity for Actions to Azure    | [ADR-034](034-federated-identity-actions-to-azure.md) |
 | 035 | Azure-Only Maven Profile Restriction       | [ADR-035](035-azure-only-maven-profile.md) |
 | 036 | Workflow Trust Boundaries for CI/CD        | [ADR-036](036-workflow-trust-boundaries.md) |
+| 037 | Engineering System Owns the Canonical Service Dockerfile | [ADR-037](037-engineering-system-owns-service-dockerfile.md) |
 
 ## Overview
 
@@ -230,4 +231,9 @@ These Architecture Decision Records document the key design choices made in the 
 - Credential-bearing jobs (`docker-push`, `deploy`, `integration-test`) run only in trusted event contexts
 - Canonical `if:` gate excludes `dependabot[bot]` and `pull_request_target` and permits only internal PR heads
 - External-fork PRs lose deploy/test signal by design to protect the cluster federated identity
+
+**Engineering System Owns the Canonical Service Dockerfile (ADR-037)**
+- One canonical `build/Dockerfile` lives in the template and syncs to every fork (`sync-config.json` `directories[]`); services do not supply their own
+- Mirrors the OSDU community `service-base-image/java/Dockerfile`: `COPY ${JAR_FILE} /app.jar` (no Maven in the image build); the JAR is the one our `java-build` job compiled from source, never a prebuilt artifact from OSDU's Maven registry
+- `JAR_FILE` defaults to `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (override via `vars.SERVICE_TARGET_JAR`); `BASE_IMAGE` is an `ARG` defaulting to OSDU `alpine-zulu17` so a later registry pivot is a one-line swap
 

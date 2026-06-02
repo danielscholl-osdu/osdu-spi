@@ -4,7 +4,7 @@ Builds a service container image from Maven JAR artifacts and optionally pushes 
 
 ## Purpose
 
-This action turns the JARs produced by the [`java-build`](../java-build) action into a container image. It does **not** run Maven — it consumes the `build-artifacts` artifact from a preceding job. A single `push` input selects between two modes so one action can back both jobs in `validate.yml` (W5a):
+This action turns the JARs produced by the [`java-build`](../java-build) action into a container image. It does **not** run Maven — it consumes the `build-artifacts` artifact from a preceding job and `COPY`s the built JAR into the image. The Dockerfile is the canonical one the engineering system syncs to every fork (`build/Dockerfile`, ADR-037); services do not supply their own. A single `push` input selects between two modes so one action can back both jobs in `validate.yml` (W5a):
 
 - `push: 'false'` — build only. Validates that the Dockerfile compiles. **No GHCR login happens**, and the built image is kept only in the BuildKit/buildx cache (it is not pushed, nor loaded into the runner's Docker image store).
 - `push: 'true'` — build, log in to GHCR, push, compute branch tags, and flip the package public.
@@ -29,12 +29,12 @@ java-build (uploads build-artifacts) → docker-build (this action)
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `image_name` | **Yes** | — | Short service name (e.g. `partition`); set from `vars.SERVICE_NAME` |
-| `dockerfile_path` | No | `devops/azure/Dockerfile` | Dockerfile path relative to the repo root |
+| `dockerfile_path` | No | `build/Dockerfile` | Dockerfile path relative to the repo root. Defaults to the canonical Dockerfile the engineering system syncs to every fork (ADR-037) |
 | `build_context` | No | `.` | Docker build context directory |
 | `registry` | No | `ghcr.io` | Container registry host |
 | `org` | No | _(repo owner)_ | Registry org/owner; falls back to the workflow `github.repository_owner` at runtime when omitted |
 | `jar_artifact_name` | No | `build-artifacts` | Name of the artifact containing the built JARs |
-| `build_args` | No | — | Optional `--build-arg` values (newline-separated `KEY=VALUE`). **Never pass `GITHUB_TOKEN` here.** |
+| `build_args` | No | — | Optional `--build-arg` values (newline-separated `KEY=VALUE`). The canonical Dockerfile (ADR-037) requires `JAR_FILE=<path to the java-build JAR>`; `validate.yml` defaults it to `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (override with `vars.SERVICE_TARGET_JAR`). **Never pass `GITHUB_TOKEN` here.** |
 | `push` | No | `'true'` | `'true'` logs in, pushes, tags, and flips visibility; `'false'` builds only |
 | `github_token` | No | — | Token for GHCR login + visibility flip. Consumed only on the push path |
 
@@ -91,5 +91,5 @@ The full action cannot be exercised in this template repository (`validate.yml` 
 
 ## Related
 
-- ADR-010 (YAML-safe shell scripting), ADR-013 (reusable actions), ADR-028 (script extraction), ADR-033 (GHCR registry), ADR-036 (workflow trust boundaries)
+- ADR-010 (YAML-safe shell scripting), ADR-013 (reusable actions), ADR-028 (script extraction), ADR-033 (GHCR registry), ADR-036 (workflow trust boundaries), ADR-037 (canonical service Dockerfile)
 - [`docker-build-workflow-spec.md`](../../../doc/product/docker-build-workflow-spec.md)
