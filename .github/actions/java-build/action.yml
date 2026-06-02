@@ -60,9 +60,14 @@ runs:
           MAVEN_CLI_OPTS="$MAVEN_CLI_OPTS --settings=.mvn/community-maven.settings.xml"
         fi
 
-        # Restrict to a single Maven profile when the caller supplies one (ADR-035)
-        if [ -n "${{ inputs.maven_profile }}" ]; then
-          MAVEN_CLI_OPTS="$MAVEN_CLI_OPTS -P ${{ inputs.maven_profile }}"
+        # Restrict to a single Maven profile when the caller supplies one (ADR-035).
+        # Read from env (not direct interpolation) and validate to prevent option injection.
+        if [ -n "${MAVEN_PROFILE:-}" ]; then
+          if ! printf '%s' "$MAVEN_PROFILE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._,-]*$'; then
+            echo "::error::Invalid maven_profile '${MAVEN_PROFILE}' (allowed characters: A-Z a-z 0-9 . _ , -)"
+            exit 1
+          fi
+          MAVEN_CLI_OPTS="$MAVEN_CLI_OPTS -P $MAVEN_PROFILE"
         fi
 
         if [[ "${{ inputs.generate_coverage }}" == "true" ]]; then
@@ -82,6 +87,7 @@ runs:
       env:
         MAVEN_OPTS: "-Dmaven.repo.local=$HOME/.m2/repository"
         COMMUNITY_MAVEN_TOKEN: ${{ inputs.gitlab_token }}
+        MAVEN_PROFILE: ${{ inputs.maven_profile }}
 
     - name: "Upload Build Artifacts"
       if: steps.check_pom.outputs.has_pom == 'true'

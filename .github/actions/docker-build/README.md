@@ -32,7 +32,7 @@ java-build (uploads build-artifacts) → docker-build (this action)
 | `dockerfile_path` | No | `devops/azure/Dockerfile` | Dockerfile path relative to the repo root |
 | `build_context` | No | `.` | Docker build context directory |
 | `registry` | No | `ghcr.io` | Container registry host |
-| `org` | No | `${{ github.repository_owner }}` | Registry organisation/owner |
+| `org` | No | _(repo owner)_ | Registry org/owner; falls back to the workflow `github.repository_owner` at runtime when omitted |
 | `jar_artifact_name` | No | `build-artifacts` | Name of the artifact containing the built JARs |
 | `build_args` | No | — | Optional `--build-arg` values (newline-separated `KEY=VALUE`). **Never pass `GITHUB_TOKEN` here.** |
 | `push` | No | `'true'` | `'true'` logs in, pushes, tags, and flips visibility; `'false'` builds only |

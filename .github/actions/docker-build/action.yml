@@ -18,9 +18,8 @@ inputs:
     required: false
     default: 'ghcr.io'
   org:
-    description: 'Registry organisation/owner'
+    description: 'Registry organisation/owner. Falls back to the workflow github.repository_owner at runtime when omitted.'
     required: false
-    default: ${{ github.repository_owner }}
   jar_artifact_name:
     description: 'Name of the GitHub Actions artifact that contains the built JARs'
     required: false
@@ -50,10 +49,22 @@ outputs:
 runs:
   using: "composite"
   steps:
+    - name: "Validate push prerequisites"
+      if: ${{ inputs.push == 'true' }}
+      shell: bash
+      run: |
+        # Fail fast: the push path needs a token for GHCR login and the visibility flip
+        if [ -z "${GITHUB_TOKEN:-}" ]; then
+          echo "::error::push=true requires github_token (GHCR login + visibility flip)."
+          exit 1
+        fi
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+
     - name: "Compute image metadata"
       id: meta
       shell: bash
-      run: ${{ github.action_path }}/compute-metadata.sh "${{ inputs.registry }}" "${{ inputs.org }}" "${{ inputs.image_name }}"
+      run: ${{ github.action_path }}/compute-metadata.sh "${{ inputs.registry }}" "${{ inputs.org || github.repository_owner }}" "${{ inputs.image_name }}"
 
     - name: "Download build artifacts"
       uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5.0.0
@@ -92,7 +103,7 @@ runs:
     - name: "Ensure package is public"
       if: ${{ inputs.push == 'true' && steps.build.outcome == 'success' }}
       shell: bash
-      run: ${{ github.action_path }}/set-package-visibility.sh "${{ inputs.org }}" "${{ inputs.image_name }}"
+      run: ${{ github.action_path }}/set-package-visibility.sh "${{ inputs.org || github.repository_owner }}" "${{ inputs.image_name }}"
       env:
         GITHUB_TOKEN: ${{ inputs.github_token }}
 

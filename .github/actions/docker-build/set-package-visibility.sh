@@ -28,20 +28,23 @@ if [[ $# -ne 2 ]]; then
   exit 1
 fi
 
-ORG="$1"
-PACKAGE_NAME="$2"
+# GHCR owner/package names are lowercase; normalize before hitting the API
+ORG="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+PACKAGE_NAME="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "⚠️  GITHUB_TOKEN not set; skipping visibility flip. Run 'gh workflow run settings-apply.yml' to reconcile."
   exit 0
 fi
 
-# Discriminate org-owned vs user-owned account to pick the right packages endpoint
+# Discriminate org-owned vs user-owned to choose the correct packages namespace.
+# Org packages live under /orgs/<org>/...; a user's own packages are written via the
+# authenticated-user namespace /user/... (NOT /users/<user>/..., which is read-only).
 OWNER_TYPE="$(gh api "/users/${ORG}" --jq '.type' 2>/dev/null || echo "")"
 if [[ "$OWNER_TYPE" == "Organization" ]]; then
   BASE="orgs/${ORG}"
 else
-  BASE="users/${ORG}"
+  BASE="user"
 fi
 
 # Read current visibility; an empty result means the package is missing or unreadable (skip silently)
