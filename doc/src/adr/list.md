@@ -39,6 +39,11 @@ Architecture Decision Records for Fork Management Template
 | 029 | GitHub App Authentication Strategy         | [ADR-029](029-github-app-authentication-strategy.md) |
 | 030 | CodeQL Summary Job Pattern                 | [ADR-030](030-codeql-summary-job-pattern.md) |
 | 031 | Template Sync Duplicate Prevention Pattern | [ADR-031](031-template-sync-duplicate-prevention.md) |
+| 032 | CI/CD Deploy Loop via Suspended Flux       | [ADR-032](032-cicd-deploy-loop-via-suspended-flux.md) |
+| 033 | GHCR as Service Image Registry             | [ADR-033](033-ghcr-as-service-image-registry.md) |
+| 034 | Federated Identity for Actions to Azure    | [ADR-034](034-federated-identity-actions-to-azure.md) |
+| 035 | Azure-Only Maven Profile Restriction       | [ADR-035](035-azure-only-maven-profile.md) |
+| 036 | Workflow Trust Boundaries for CI/CD        | [ADR-036](036-workflow-trust-boundaries.md) |
 
 ## Overview
 
@@ -200,4 +205,29 @@ These Architecture Decision Records document the key design choices made in the 
 - Label-based tracking with `template-sync` label for PR identification
 - Branch reuse with force-push when template advances
 - Eliminates daily accumulation of open template-sync PRs
+
+**CI/CD Deploy Loop via Suspended Flux (ADR-032)**
+- Flux Kustomizations permanently suspended on the shared `osdu-spi-stack` cluster as steady state
+- Per-PR workflows use `kubectl set image` with immutable digest references to deploy services
+- Pre-flight Flux-suspend assertion prevents silent drift from accidental operator resume
+- Baseline refresh (planned outage) is the only mechanism that resets the cluster to declared HelmRelease state
+
+**GHCR as Service Image Registry (ADR-033)**
+- Public GHCR for SPI service CI/test artifacts consumed by the `osdu-spi-stack` AKS cluster
+- Push via `GITHUB_TOKEN`, pull anonymously from AKS — no `imagePullSecret`
+- MCR migration deferred; ACR/MCR swap is localized to the visibility helper, private-GHCR fallback is broader-touch
+
+**Federated Identity for Actions to Azure (ADR-034)**
+- Per-service User-Assigned Managed Identity + GitHub OIDC replaces static `AZURE_CREDENTIALS`
+- Required federated subjects: branches wildcard + `pull_request`; the tags wildcard is provisioned only if registry auth later moves to OIDC (least privilege)
+- Onboarding split at the credential boundary: `spi onboard` (cluster IAM/RBAC) + `init.yml` extension (fork setup)
+
+**Azure-Only Maven Profile Restriction (ADR-035)**
+- CI builds only the profile named by the per-service `MAVEN_PROFILE` variable (e.g. `partition-azure`); unset leaves the build unchanged
+- Faster, Azure-relevant CI signal; non-Azure provider regressions are intentionally out of the default path
+
+**Workflow Trust Boundaries for CI/CD (ADR-036)**
+- Credential-bearing jobs (`docker-push`, `deploy`, `integration-test`) run only in trusted event contexts
+- Canonical `if:` gate excludes `dependabot[bot]` and `pull_request_target` and permits only internal PR heads
+- External-fork PRs lose deploy/test signal by design to protect the cluster federated identity
 
