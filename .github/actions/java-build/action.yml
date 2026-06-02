@@ -10,7 +10,7 @@ inputs:
     description: 'GitLab token for Maven authentication'
     required: false
   maven_profile:
-    description: 'Optional Maven profile(s) to restrict the build (e.g. partition-azure, or a comma-separated list). When empty, all modules build (unchanged behaviour).'
+    description: 'Optional Maven profile(s) to restrict the build (e.g. core,azure — a comma-separated list is allowed). When empty, no -P is passed; validate.yml supplies the core,azure default (ADR-035).'
     required: false
 
 outputs:

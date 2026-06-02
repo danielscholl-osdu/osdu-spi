@@ -11,7 +11,7 @@
 
 - The engineering system (`osdu-spi`) owns a single canonical Java service Dockerfile at `build/Dockerfile`, synced to every fork via `sync-config.json` (`directories[]`, `sync_all`). Service forks do not supply their own Dockerfile for CI; the `docker-build` action default `dockerfile_path` becomes `build/Dockerfile`.
 - The recipe mirrors the OSDU community `service-base-image/java/Dockerfile`: `COPY ${JAR_FILE} app.jar` into a base image, with the JVM / AppInsights / MSI environment the community image expects. No Maven runs inside the image build.
-- `JAR_FILE` is supplied by the caller as a build-arg pointing at the JAR our `java-build` job produced — default `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar`, overridable per service via `vars.SERVICE_TARGET_JAR`. The JAR is always one we built from source; it is never a prebuilt artifact pulled from OSDU's Maven registry.
+- `JAR_FILE` is supplied by the caller as a build-arg pointing at the JAR our `java-build` job produced — default `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (`SERVICE_NAME` itself defaulting to the repo name), overridable per service via the `SERVICE_TARGET_JAR` repository variable. The repo-name default assumes the repo name is the Maven service slug, which holds for the bare-named service forks; a renamed or `osdu-spi-*`-prefixed repo sets `SERVICE_NAME`. The JAR is always one we built from source; it is never a prebuilt artifact pulled from OSDU's Maven registry.
 - `BASE_IMAGE` is an `ARG`, defaulting to OSDU's `alpine-zulu17` for runtime parity with the community image. Keeping it an `ARG` makes a later registry pivot (mirror the base into GHCR, or move to a public base) a one-line change with no Dockerfile rework.
 
 ## Consequences
@@ -25,7 +25,7 @@
 ### Negative
 
 - The base-image default points at OSDU's GitLab container registry (`community.opengroup.org:5555`). If a GitHub Actions runner cannot pull it anonymously, the build fails at `FROM` — that is the signal to mirror the base into GHCR or move to a public base, a `BASE_IMAGE` swap rather than a redesign.
-- A service whose JAR deviates from the `<name>-azure/target/*-spring-boot.jar` convention must set `vars.SERVICE_TARGET_JAR`.
+- A service whose JAR deviates from the `<name>-azure/target/*-spring-boot.jar` convention, or whose repo name is not the service slug, must set the `SERVICE_TARGET_JAR` (or `SERVICE_NAME`) repository variable.
 - A fork can no longer trivially diverge its Dockerfile — intentional, consistent with the template/engineering-system model (ADR-003).
 
 ### Neutral
