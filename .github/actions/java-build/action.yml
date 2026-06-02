@@ -10,7 +10,7 @@ inputs:
     description: 'GitLab token for Maven authentication'
     required: false
   maven_profile:
-    description: 'Optional Maven profile to restrict the build (e.g. partition-azure). When empty, all modules build (unchanged behaviour).'
+    description: 'Optional Maven profile(s) to restrict the build (e.g. partition-azure, or a comma-separated list). When empty, all modules build (unchanged behaviour).'
     required: false
 
 outputs:
@@ -63,7 +63,7 @@ runs:
           MAVEN_CLI_OPTS="$MAVEN_CLI_OPTS --settings=.mvn/community-maven.settings.xml"
         fi
 
-        # Restrict to a single Maven profile when the caller supplies one (ADR-035).
+        # Restrict the build to the caller-supplied Maven profile(s) (ADR-035; comma-separated list allowed).
         # Read from env (not direct interpolation) and validate the whole value (bash =~ anchors
         # against the entire string, so an embedded newline cannot smuggle in a second option).
         if [ -n "${MAVEN_PROFILE:-}" ]; then

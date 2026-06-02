@@ -28,7 +28,7 @@ inputs:
     description: 'Optional --build-arg values (newline-separated KEY=VALUE). Never pass GITHUB_TOKEN here.'
     required: false
   push:
-    description: 'When true, log in to GHCR, push the image, compute branch/version tags, and flip package visibility. When false, build only (no registry auth). The caller must set this explicitly per job.'
+    description: 'When true, log in to GHCR, push the image, compute branch (snapshot) tags, and flip package visibility. When false, build only (no registry auth). The caller must set this explicitly per job.'
     required: false
     default: 'true'
   github_token:

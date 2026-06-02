@@ -6,7 +6,7 @@ Builds a service container image from Maven JAR artifacts and optionally pushes 
 
 This action turns the JARs produced by the [`java-build`](../java-build) action into a container image. It does **not** run Maven — it consumes the `build-artifacts` artifact from a preceding job. A single `push` input selects between two modes so one action can back both jobs in `validate.yml` (W5a):
 
-- `push: 'false'` — build only. Validates that the Dockerfile compiles. **No GHCR login happens** and the image stays on the runner.
+- `push: 'false'` — build only. Validates that the Dockerfile compiles. **No GHCR login happens**, and the built image is kept only in the BuildKit/buildx cache (it is not pushed, nor loaded into the runner's Docker image store).
 - `push: 'true'` — build, log in to GHCR, push, compute branch tags, and flip the package public.
 
 > **`push` defaults to `'true'`.** The caller must set `push: 'false'` explicitly on the validate-only `docker-build` job; otherwise it will attempt a credentialed push.
