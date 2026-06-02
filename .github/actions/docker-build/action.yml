@@ -64,7 +64,14 @@ runs:
     - name: "Compute image metadata"
       id: meta
       shell: bash
-      run: ${{ github.action_path }}/compute-metadata.sh "${{ inputs.registry }}" "${{ inputs.org || github.repository_owner }}" "${{ inputs.image_name }}"
+      # Inputs are passed via env (never interpolated into the script body) so a value
+      # containing $(...) or backticks cannot be shell-evaluated.
+      run: |
+        "$GITHUB_ACTION_PATH/compute-metadata.sh" "$REGISTRY" "$ORG" "$IMAGE_NAME"
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        ORG: ${{ inputs.org || github.repository_owner }}
+        IMAGE_NAME: ${{ inputs.image_name }}
 
     - name: "Download build artifacts"
       uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5.0.0
@@ -75,7 +82,13 @@ runs:
     - name: "Compute image tags"
       id: tags
       shell: bash
-      run: ${{ github.action_path }}/compute-tags.sh "${{ steps.meta.outputs.image_repository }}" "${{ steps.meta.outputs.short_sha }}" "${{ github.ref_name }}" "${{ inputs.push }}"
+      run: |
+        "$GITHUB_ACTION_PATH/compute-tags.sh" "$IMAGE_REPOSITORY" "$SHORT_SHA" "$REF_NAME" "$PUSH"
+      env:
+        IMAGE_REPOSITORY: ${{ steps.meta.outputs.image_repository }}
+        SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+        REF_NAME: ${{ github.ref_name }}
+        PUSH: ${{ inputs.push }}
 
     - name: "Set up Docker Buildx"
       uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
@@ -103,18 +116,26 @@ runs:
     - name: "Ensure package is public"
       if: ${{ inputs.push == 'true' && steps.build.outcome == 'success' }}
       shell: bash
-      run: ${{ github.action_path }}/set-package-visibility.sh "${{ inputs.org || github.repository_owner }}" "${{ inputs.image_name }}"
+      run: |
+        "$GITHUB_ACTION_PATH/set-package-visibility.sh" "$ORG" "$IMAGE_NAME"
       env:
         GITHUB_TOKEN: ${{ inputs.github_token }}
+        ORG: ${{ inputs.org || github.repository_owner }}
+        IMAGE_NAME: ${{ inputs.image_name }}
 
     - name: "Summary"
       shell: bash
       run: |
         # Log-only; never echoes the token
-        echo "Repository: ${{ steps.meta.outputs.image_repository }}"
-        echo "Tags: ${{ steps.tags.outputs.image_tags }}"
-        if [ "${{ inputs.push }}" = "true" ]; then
-          echo "Digest: ${{ steps.build.outputs.digest }}"
+        echo "Repository: $IMAGE_REPOSITORY"
+        echo "Tags: $IMAGE_TAGS"
+        if [ "$PUSH" = "true" ]; then
+          echo "Digest: $IMAGE_DIGEST"
         else
           echo "build-only run (push gated off by caller; no GHCR auth attempted)"
         fi
+      env:
+        IMAGE_REPOSITORY: ${{ steps.meta.outputs.image_repository }}
+        IMAGE_TAGS: ${{ steps.tags.outputs.image_tags }}
+        PUSH: ${{ inputs.push }}
+        IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
