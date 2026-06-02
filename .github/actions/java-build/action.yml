@@ -61,9 +61,10 @@ runs:
         fi
 
         # Restrict to a single Maven profile when the caller supplies one (ADR-035).
-        # Read from env (not direct interpolation) and validate to prevent option injection.
+        # Read from env (not direct interpolation) and validate the whole value (bash =~ anchors
+        # against the entire string, so an embedded newline cannot smuggle in a second option).
         if [ -n "${MAVEN_PROFILE:-}" ]; then
-          if ! printf '%s' "$MAVEN_PROFILE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._,-]*$'; then
+          if [[ ! "$MAVEN_PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._,-]*$ ]]; then
             echo "::error::Invalid maven_profile '${MAVEN_PROFILE}' (allowed characters: A-Z a-z 0-9 . _ , -)"
             exit 1
           fi
@@ -71,8 +72,9 @@ runs:
         fi
 
         if [[ "${{ inputs.generate_coverage }}" == "true" ]]; then
-          # Run build with coverage
-          mvn $MAVEN_CLI_OPTS clean test org.jacoco:jacoco-maven-plugin:0.8.11:report
+          # Run build with coverage; use 'install' (not 'test') so JARs are packaged into
+          # **/target/*.jar for the build-artifacts upload that docker-build consumes
+          mvn $MAVEN_CLI_OPTS clean install org.jacoco:jacoco-maven-plugin:0.8.11:report
           
           # Generate coverage summary
           echo "# Test Coverage Report" >> $GITHUB_STEP_SUMMARY
