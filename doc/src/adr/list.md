@@ -236,5 +236,5 @@ These Architecture Decision Records document the key design choices made in the 
 **Engineering System Owns the Canonical Service Dockerfile (ADR-037)**
 - One canonical `build/Dockerfile` lives in the template and syncs to every fork (`sync-config.json` `directories[]`); services do not supply their own
 - Mirrors the OSDU community `service-base-image/java/Dockerfile`: `COPY ${JAR_FILE} /app.jar` (no Maven in the image build); the JAR is the one our `java-build` job compiled from source, never a prebuilt artifact from OSDU's Maven registry
-- `JAR_FILE` defaults to `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (override via `vars.SERVICE_TARGET_JAR`); `BASE_IMAGE` is an `ARG` defaulting to OSDU `alpine-zulu17` so a later registry pivot is a one-line swap
+- `JAR_FILE` defaults to `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (override via the `SERVICE_TARGET_JAR` repository variable); `BASE_IMAGE` is an `ARG` defaulting to OSDU `alpine-zulu17` so a later registry pivot is a one-line swap
 

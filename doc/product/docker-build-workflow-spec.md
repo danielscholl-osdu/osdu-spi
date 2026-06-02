@@ -158,12 +158,12 @@ graph TD
 | Failure | Symptom | Resolution |
 |---------|---------|------------|
 | `build/Dockerfile` missing | Job fails at the Docker build step | The canonical Dockerfile syncs from the template (ADR-037); confirm template-sync delivered `build/Dockerfile` to the fork |
-| `JAR_FILE` glob matches no file | Docker `COPY` fails | The java-build artifact path differs from `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar`; set `vars.SERVICE_TARGET_JAR` to the correct path |
+| `JAR_FILE` glob matches no file | Docker `COPY` fails | The java-build artifact path differs from `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar`; set the `SERVICE_TARGET_JAR` repository variable to the correct path |
 | JAR artifact missing (java-build skipped or failed) | `docker-build` job is skipped via `needs: java-build` dependency | Fix the java-build failure; docker-build re-runs automatically |
 | GHCR push fails — rate limit or transient network | `docker-push` job fails | Re-run the failed job; GHCR push is idempotent |
 | Image too large (>1 GB) | Warning surfaced in job summary | Not blocking in initial rollout; investigate multi-stage Dockerfile optimisation |
 | First-time push — package created private | `docker-push` succeeds; downstream deploy fails with `ErrImagePull` | The action attempts an immediate public-visibility flip after push; `init.yml` reconciles visibility for fresh forks; `settings-apply.yml` reconciles for existing forks on schedule |
-| Repo name ≠ desired image/JAR stem | Image pushed under the wrong name, or the `JAR_FILE` glob misses | `SERVICE_NAME` defaults to the repo name; set `vars.SERVICE_NAME` (and/or `vars.SERVICE_TARGET_JAR`) when they differ |
+| Repo name ≠ desired image/JAR stem (e.g. an `osdu-spi-*`-prefixed repo) | Image pushed under the wrong name, or the `JAR_FILE` glob misses | `SERVICE_NAME` defaults to the repo name; set the `SERVICE_NAME` (and/or `SERVICE_TARGET_JAR`) repository variable when they differ |
 
 ## Trust Boundary
 
@@ -222,7 +222,7 @@ All three are **optional** — the common fork builds with none of them set (`SE
 
 ### Dockerfile Location
 
-The action defaults to `build/Dockerfile` — the **canonical Dockerfile the engineering system owns and syncs to every fork** ([ADR-037](../src/adr/037-engineering-system-owns-service-dockerfile.md)). Service forks do not supply their own; the recipe is service-agnostic and `COPY`s the JAR via the `JAR_FILE` build-arg, which `validate.yml` sets to `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (override per service with `vars.SERVICE_TARGET_JAR`). Override `dockerfile_path` only for a service that genuinely needs a bespoke image.
+The action defaults to `build/Dockerfile` — the **canonical Dockerfile the engineering system owns and syncs to every fork** ([ADR-037](../src/adr/037-engineering-system-owns-service-dockerfile.md)). Service forks do not supply their own; the recipe is service-agnostic and `COPY`s the JAR via the `JAR_FILE` build-arg, which `validate.yml` sets to `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (override per service with the `SERVICE_TARGET_JAR` repository variable). Override `dockerfile_path` only for a service that genuinely needs a bespoke image.
 
 ## References
 

@@ -282,8 +282,9 @@ jobs:
         with:
           push: 'false'                       # validates the Dockerfile compiles; no GHCR login/push
           image_name: ${{ vars.SERVICE_NAME || github.event.repository.name }}
-          # JAR built by java-build (ADR-037); SERVICE_TARGET_JAR overrides the <name>-azure convention
-          # (e.g. entitlements builds provider/entitlements-v2-azure).
+          # SERVICE_NAME falls back to the repo name (== service slug for our bare-named forks); a repo whose
+          # name isn't the slug (e.g. an upstream osdu-spi-* repo) sets SERVICE_NAME. JAR built by java-build
+          # (ADR-037); SERVICE_TARGET_JAR overrides a deviant module path (e.g. provider/entitlements-v2-azure).
           build_args: |
             JAR_FILE=${{ vars.SERVICE_TARGET_JAR || format('provider/{0}-azure/target/*-spring-boot.jar', vars.SERVICE_NAME || github.event.repository.name) }}
 
@@ -344,8 +345,9 @@ jobs:
           push: 'true'
           image_name: ${{ vars.SERVICE_NAME || github.event.repository.name }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          # JAR built by java-build (ADR-037); SERVICE_TARGET_JAR overrides the <name>-azure convention
-          # (e.g. entitlements builds provider/entitlements-v2-azure).
+          # SERVICE_NAME falls back to the repo name (== service slug for our bare-named forks); a repo whose
+          # name isn't the slug (e.g. an upstream osdu-spi-* repo) sets SERVICE_NAME. JAR built by java-build
+          # (ADR-037); SERVICE_TARGET_JAR overrides a deviant module path (e.g. provider/entitlements-v2-azure).
           build_args: |
             JAR_FILE=${{ vars.SERVICE_TARGET_JAR || format('provider/{0}-azure/target/*-spring-boot.jar', vars.SERVICE_NAME || github.event.repository.name) }}
 

@@ -306,7 +306,7 @@ outputs:
 Callers MUST compose the deploy reference as `${image_repository}@${image_digest}`; never pass a tag to deploy.
 
 **Failure modes:**
-- Dockerfile missing → job fails at the Docker build step; `build/Dockerfile` syncs from the template (ADR-037), so confirm template-sync delivered it. A `JAR_FILE` glob that matches no file fails the `COPY`; set `vars.SERVICE_TARGET_JAR` when the JAR is not at `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar`
+- Dockerfile missing → job fails at the Docker build step; `build/Dockerfile` syncs from the template (ADR-037), so confirm template-sync delivered it. A `JAR_FILE` glob that matches no file fails the `COPY`; set the `SERVICE_TARGET_JAR` repository variable when the JAR is not at `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar`
 - JAR artifact missing (java-build skipped or failed) → job is skipped (`needs: java-build`)
 - GHCR push fails (rate limit, network) → job fails, retried by re-running workflow
 - Image too large (>1GB) → warning surfaced, not blocking initially
