@@ -126,13 +126,28 @@ runs:
     - name: "Summary"
       shell: bash
       run: |
-        # Log-only; never echoes the token
+        # Never echoes the token. Mirror to $GITHUB_STEP_SUMMARY so the validate-only
+        # required check (and the push job's digest) are legible in the PR Checks UI.
+        if [ "$PUSH" = "true" ]; then
+          HEADING="🐳 Docker Push"
+          MSG="Image pushed: \`${IMAGE_REPOSITORY}@${IMAGE_DIGEST}\`"
+        else
+          HEADING="🐳 Docker Build"
+          MSG="Dockerfile validated; no GHCR push (validate-only job)"
+        fi
         echo "Repository: $IMAGE_REPOSITORY"
         echo "Tags: $IMAGE_TAGS"
-        if [ "$PUSH" = "true" ]; then
-          echo "Digest: $IMAGE_DIGEST"
-        else
-          echo "build-only run (push gated off by caller; no GHCR auth attempted)"
+        echo "$MSG"
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          {
+            echo "### ${HEADING}"
+            echo ""
+            echo "- Repository: \`${IMAGE_REPOSITORY}\`"
+            if [ "$PUSH" = "true" ]; then
+              echo "- Tags: \`${IMAGE_TAGS}\`"
+            fi
+            echo "- ${MSG}"
+          } >> "$GITHUB_STEP_SUMMARY"
         fi
       env:
         IMAGE_REPOSITORY: ${{ steps.meta.outputs.image_repository }}
