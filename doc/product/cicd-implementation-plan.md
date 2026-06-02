@@ -231,7 +231,7 @@ Each subsection below is a copy-pasteable issue body. The H3 header is the issue
 **Slot:** `W1` &nbsp;|&nbsp; **Label:** `enhancement` &nbsp;|&nbsp; **Effort:** `XS` &nbsp;|&nbsp; **Blocked by:** None &nbsp;|&nbsp; **Ships in:** Build PR
 
 **Context:**
-Today `.github/actions/java-build/action.yml` runs `mvn clean install` with no `-P` flag, building all cloud provider modules. The new CI/CD design (D5, ADR-035) restricts service builds to the Azure profile (e.g. `partition-azure`) to speed builds and narrow the unit-test signal. The profile name is a per-service repo variable.
+Today `.github/actions/java-build/action.yml` runs `mvn clean install` with no `-P` flag, building all cloud provider modules. The new CI/CD design (D5, ADR-035) restricts service builds to the Azure profile set (`core,azure`) to speed builds and narrow the unit-test signal. `validate.yml` hardcodes that default; `MAVEN_PROFILE` is an optional per-service override.
 
 **Task:**
 Add an optional input `maven_profile` to the action. When set, the Maven command appends `-P <profile>`. When unset, behaviour is unchanged so existing forks don't break before they set the variable.
@@ -840,7 +840,7 @@ Extend `init.yml` / `init-complete.yml` and add helpers under `.github/local-act
 
 **Acceptance criteria:**
 - [ ] **GHCR visibility flip (no retention)**: Uses the org-package endpoint (`/orgs/{owner}/packages/...`) when `${{ github.repository_owner }}` is an Organization, the user-package endpoint otherwise. Discriminate via `gh api /users/{owner} --jq '.type'`. Skips silently if the package doesn't exist yet at init time (first `docker-build` will create it; `SETTINGS-APPLY`'s scheduled `settings-apply.yml` reconciles after first push). **Retention is NOT set here — that's W11's job**
-- [ ] **Per-service variable bootstrap (build-side)**: `setup-service-variables.sh` reads operator-supplied per-service variables from `init.yml` inputs and writes via `gh variable set`: `SERVICE_NAME`, `MAVEN_PROFILE`. Defaults are documented; required values fail the init job loudly with a clear message naming which input is missing. **`ACCEPTANCE_TEST_*` variables are NOT written by ONBOARD-INIT-A — those land in ONBOARD-INIT-B**
+- [ ] **Per-service variable bootstrap (build-side)**: `setup-service-variables.sh` writes per-service overrides via `gh variable set` **only when they deviate from the runtime defaults**. Per ADR-035/ADR-037, `validate.yml` now defaults `SERVICE_NAME` → repo name, `MAVEN_PROFILE` → `core,azure`, and `SERVICE_TARGET_JAR` → derived, so the common fork needs **none** of these set — the helper is a no-op for it and writes a variable only for a deviant fork (e.g. `MAVEN_PROFILE` for `indexer-queue`, `SERVICE_TARGET_JAR` for `entitlements`). None of these are required inputs; do not fail init when they are absent. **`ACCEPTANCE_TEST_*` variables are NOT written by ONBOARD-INIT-A — those land in ONBOARD-INIT-B.** (Consequently, `SETTINGS-APPLY`'s readiness manifest should treat `SERVICE_NAME` / `MAVEN_PROFILE` as optional, not required.)
 - [ ] Helpers run via `init-complete.yml` (after `Setup Repository Rulesets`); they're added to the temp-location preservation block (lines 290-302 of `init-complete.yml`) since `deploy-fork-resources.sh` runs immediately after them
 - [ ] No secret values logged at any step
 - [ ] `init.yml`'s existing happy path (template-fresh fork) still succeeds end-to-end with the build-side behaviours layered in

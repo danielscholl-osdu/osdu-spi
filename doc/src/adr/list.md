@@ -224,8 +224,9 @@ These Architecture Decision Records document the key design choices made in the 
 - Onboarding split at the credential boundary: `spi onboard` (cluster IAM/RBAC) + `init.yml` extension (fork setup)
 
 **Azure-Only Maven Profile Restriction (ADR-035)**
-- CI builds only the profile named by the per-service `MAVEN_PROFILE` variable (e.g. `partition-azure`); unset leaves the build unchanged
-- Faster, Azure-relevant CI signal; non-Azure provider regressions are intentionally out of the default path
+- CI builds the Azure profile set with a hardcoded default of `core,azure` (correct for 9/10 forks); `core` is `activeByDefault`, so a bare `-P azure` would drop it
+- `MAVEN_PROFILE` is an optional per-fork override (`${{ vars.MAVEN_PROFILE || 'core,azure' }}`) for forks that deviate (e.g. `indexer-queue`); never emits a bare `-P`
+- Faster, Azure-relevant CI signal with zero per-fork config in the common case; non-Azure provider regressions are intentionally out of the default path
 
 **Workflow Trust Boundaries for CI/CD (ADR-036)**
 - Credential-bearing jobs (`docker-push`, `deploy`, `integration-test`) run only in trusted event contexts

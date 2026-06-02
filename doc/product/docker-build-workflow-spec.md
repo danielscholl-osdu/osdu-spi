@@ -163,7 +163,7 @@ graph TD
 | GHCR push fails — rate limit or transient network | `docker-push` job fails | Re-run the failed job; GHCR push is idempotent |
 | Image too large (>1 GB) | Warning surfaced in job summary | Not blocking in initial rollout; investigate multi-stage Dockerfile optimisation |
 | First-time push — package created private | `docker-push` succeeds; downstream deploy fails with `ErrImagePull` | The action attempts an immediate public-visibility flip after push; `init.yml` reconciles visibility for fresh forks; `settings-apply.yml` reconciles for existing forks on schedule |
-| `vars.SERVICE_NAME` not set | `image_name` input is empty; action fails | Run `init.yml` (fresh fork) or the ONBOARD-INIT-A helper (`setup-service-variables.sh`) to populate the variable |
+| Repo name ≠ desired image/JAR stem | Image pushed under the wrong name, or the `JAR_FILE` glob misses | `SERVICE_NAME` defaults to the repo name; set `vars.SERVICE_NAME` (and/or `vars.SERVICE_TARGET_JAR`) when they differ |
 
 ## Trust Boundary
 
@@ -214,11 +214,11 @@ A scheduled `ghcr-retention.yml` workflow (W11) prunes old `:sha-*` and `:<branc
 
 | Variable | Scope | Description |
 |----------|-------|-------------|
-| `SERVICE_NAME` | Per-fork repo variable | Short service name used as the GHCR image name (e.g. `partition`) |
-| `MAVEN_PROFILE` | Per-fork repo variable | Maven profile passed to `java-build`; default `azure` (W1 / ADR-035) |
-| `SERVICE_TARGET_JAR` | Per-fork repo variable (optional) | Overrides the `JAR_FILE` build-arg when a service's JAR is not at `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (ADR-037) |
+| `SERVICE_NAME` | Per-fork repo variable (optional) | GHCR image name + JAR-path stem; defaults to the repo name (`github.event.repository.name`). Set only to override |
+| `MAVEN_PROFILE` | Per-fork repo variable (optional) | Maven profile(s) passed to `java-build`; defaults to `core,azure` (ADR-035). Set only for forks that deviate (e.g. `indexer-queue`) |
+| `SERVICE_TARGET_JAR` | Per-fork repo variable (optional) | Overrides the `JAR_FILE` build-arg when a service's JAR is not at `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (e.g. `entitlements` → `provider/entitlements-v2-azure/...`) (ADR-037) |
 
-Both variables are bootstrapped during fork initialisation by the `ONBOARD-INIT-A` helpers (`setup-service-variables.sh`).
+All three are **optional** — the common fork builds with none of them set (`SERVICE_NAME` → repo name, `MAVEN_PROFILE` → `core,azure`, `JAR_FILE` → derived). They exist only as per-fork overrides for forks whose layout deviates (`entitlements`, `indexer-queue`).
 
 ### Dockerfile Location
 

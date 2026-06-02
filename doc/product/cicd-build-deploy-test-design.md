@@ -105,7 +105,7 @@ Without these signals, the only way to discover deployment regressions is at rel
 
 - **C1.** New stages run on the same cadence as today's per-PR validation (PR events + push to `main`/`fork_integration`/`fork_upstream`). They are appended jobs in `template-workflows/validate.yml` **only**. `template-workflows/build.yml` keeps its Maven-build-only signal for feature-branch pushes — adding deploy stages there would cause duplicate `kubectl set image` calls to race on the same shared `Deployment` whenever both workflows fire on a PR sync event (see D12).
 - **C2.** Container registry: **GHCR**, fork-owned. Packages must be **public** (decided by user) so AKS can pull without per-fork image-pull-secrets. Public visibility must be confirmed acceptable under the publishing org's container-registry policy **before Phase 4**; the design's fallback if public is disallowed is documented in §7.4.
-- **C3.** Maven build restricted to **`-P partition-azure`** (or the Azure-equivalent profile for each service). Other cloud provider profiles are not built. Faster validate, smaller blast radius.
+- **C3.** Maven build restricted to **`-P core,azure`** (the Azure profile set; uniform across 9/10 forks per ADR-035). Other cloud provider profiles are not built. Faster validate, smaller blast radius.
 - **C4.** Deploy target: **single shared `osdu-spi-stack` AKS environment**. Already running. Flux is **permanently suspended** as a steady state — not just "during CI" — because there is no per-service "CI mode" toggle for a shared cluster. Resuming Flux is a planned-outage operation requiring a CI freeze across the current service forks (see §7.5, §8.2).
 - **C5.** Deploy mechanism: **`kubectl set image`** directly on existing Deployments. No Helm from CI, no HelmRelease editing — Flux is suspended, deployments live untouched. Requires the Helm chart in `osdu-spi-stack` to materialize each service's `Deployment` with a stable, predictable resource name and container name. These names are exposed as **per-service GitHub repo variables** (`K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`) rather than derived from `SERVICE_NAME`, to insulate CI from chart-naming changes (see D13).
 - **C6.** Fork is independent at runtime: no cross-repo commits, no PRs to `osdu-spi-stack` from a service fork. Forks do **share** infrastructure (cluster, gateway URL, Key Vault), so a shared-infrastructure change (gateway DNS, KV rename) is a coordinated update across all forks.
@@ -683,7 +683,7 @@ Steps:
 
 5. **GitHub repo configuration:**
    - **Secrets:** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
-   - **Per-service repo variables:** `AZURE_CLIENT_ID` (also as var for use in `if:` expressions), `SERVICE_NAME`, `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`, `MAVEN_PROFILE` (e.g. `partition-azure`)
+   - **Per-service repo variables:** `AZURE_CLIENT_ID` (also as var for use in `if:` expressions), `K8S_DEPLOYMENT_NAME`, `K8S_CONTAINER_NAME`, `ACCEPTANCE_TEST_DIR`, `ACCEPTANCE_TEST_SECRET_MAP`. Build-side identity is optional with runtime defaults: `SERVICE_NAME` (→ repo name), `MAVEN_PROFILE` (→ `core,azure`), `SERVICE_TARGET_JAR` (→ derived) — set only when a fork deviates
    - **Org-level variables (set once, inherited):** `AKS_RESOURCE_GROUP`, `AKS_CLUSTER_NAME`, `K8S_NAMESPACE` (= `osdu`), `KEYVAULT_NAME`, `GATEWAY_URL`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`
 
 This is roughly ~20 steps per service. Automation is essential — see §9.4.
@@ -783,7 +783,7 @@ Per-fork variables (set per repo during Phase 3 — the **Set by** column shows 
 | `SERVICE_NAME` | `partition`, `entitlements`, etc. | Identifies the service in workflow ergonomics; **not** authoritative for cluster resources | Fork `init.yml` (§9.4.B) — operator-supplied |
 | `K8S_DEPLOYMENT_NAME` | Actual chart-rendered Deployment name | Insulate CI from chart naming changes (D13) | `spi onboard` (§9.4.A) — captured from live cluster |
 | `K8S_CONTAINER_NAME` | Actual container name inside the Deployment | Same — chart may use `app` or `service` rather than service slug | `spi onboard` (§9.4.A) — captured from live cluster |
-| `MAVEN_PROFILE` | `partition-azure`, `entitlements-azure`, etc. | Profile naming differs across services (Q5) | Fork `init.yml` (§9.4.B) — operator-supplied |
+| `MAVEN_PROFILE` | default `core,azure` (optional override) | Uniform across 9/10 forks; `core` is `activeByDefault`, so a bare provider profile drops it (ADR-035) | Engineering-system default; per-fork variable only when a fork deviates (e.g. `indexer-queue`) |
 | `ACCEPTANCE_TEST_DIR` | `partition-acceptance-test` | Verified per-service during Phase 5; default is `<service>-acceptance-test` | Fork `init.yml` (§9.4.B) — operator-supplied |
 | `ACCEPTANCE_TEST_SECRET_MAP` | JSON, e.g. `{"PARTITION_BASE_URL":"partition-base-url","INTEGRATION_TESTER":"int-tester-id",…}` | Each service's acceptance tests read a different set of env vars; map declares the env→KV-secret binding | Fork `init.yml` (§9.4.B) — operator-supplied |
 | `ACCEPTANCE_TEST_DEPENDENCIES` | JSON, e.g. `{"partition":"/api/partition/v1/info","legal":"/api/legal/v1/info"}` (empty `{}` for services with no upstream deps) | Per §8.9, integration-test probes each dependency's gateway health endpoint before tests; populates `cluster_state` for PR-label decisions. Audit per-service in Phase 5. | Fork `init.yml` (§9.4.B) — operator-supplied |
@@ -1059,7 +1059,7 @@ The work is sequenced in five phases, with explicit exit criteria for each.
 1. **Build locally:**
    ```
    cd danielscholl-osdu/partition
-   mvn -P partition-azure clean install
+   mvn -P core,azure clean install
    ```
    Verify: `provider/partition-azure/target/*-spring-boot.jar` exists and is ~50MB. Capture exact JAR path/filename for the Dockerfile reference.
 
@@ -1532,7 +1532,7 @@ T-shirt sizes describe **effort scale**, not wall-clock time. Real elapsed time 
 | R9 | Sandbox fork drifts from official, hard to PR back | M | M | Daily sync from official to sandbox; small PRs, not one big bang; sandbox remains long-lived post-Phase-4 (§9.5) |
 | R10 | Onboarding script depends on operator having Azure permissions to create identities | H | L | §6.1 preconditions block; CLI fails fast with remediation message; centralized "ops" identity may be used for batch onboarding |
 | R11 | Acceptance test credentials leak via Key Vault misconfig | L | H | KV RBAC scoped per service identity to read-only on specific secret prefixes; PR template warns against committing KV secret values |
-| R12 | Maven profile name varies across services (`-P partition-azure` vs `-P entitlements-azure`) | H | L | `MAVEN_PROFILE` per-service repo variable; java-build action accepts it as input |
+| R12 | Maven profile selection varies across services | L (resolved) | L | Surveyed all 10 forks: uniformly `-P core,azure` (9/10; `core` is `activeByDefault`). Hardcoded default in `validate.yml`, optional `MAVEN_PROFILE` override for the outlier (`indexer-queue`) — ADR-035 |
 | **R13** | **`pull_request_target` deploy path executes attacker-controlled PR code with cluster credentials** | **L (today) / M (post-rollout)** | **VH** | **C8/D14 — gating clause in §5.5 excludes `pull_request_target` and `dependabot[bot]` from new jobs entirely; trust-boundary table is authoritative** |
 | **R14** | **Upstream `Azure/osdu-spi-*` publishing review demands MCR (or rejects public GHCR), forcing registry swap on the Build PR** | **L (sandbox-phase) / M (upstream-phase)** | **M** | **Sandbox + danielscholl-osdu proceed on public GHCR — observable precedent across `github.com/Azure` (Eraser 1.55B downloads, azd, kubelogin, c3) confirms the pattern is normalized for CI/tooling containers. Upstream review may surface MCR per Microsoft's published policy (§7.4 *"Future migration: MCR"*); credential boundary keeps the swap localized to W2 / ONBOARD-INIT-A / SETTINGS-APPLY's visibility helper. `W3`/`W4`/`W5b`/`W8`/`ONBOARD` are registry-agnostic, so a future MCR migration replaces push + visibility logic only, not the deploy or trust-boundary architecture.** |
 | **R15** | **Broken deploy from service A leaves the cluster in a state that fails service B's tests for reasons unrelated to B's PR** | **H** | **M** | **Cross-service health probe in integration-test (§5.3, §8.9); `test_result: advisory` distinguishes contamination from genuine failure; v2 may add last-known-good rollback** |
@@ -1560,7 +1560,7 @@ Questions that have been resolved by this design pass are listed with their reso
 | Q1 | What is the gateway URL for the shared spi-stack CI cluster? | User | Step 0d (stability) + step 7 (value) |
 | Q2 | What are the exact Key Vault secret names the acceptance tests need? | Discovered in step 7 | Step 7 |
 | Q3 | Does the existing spi-stack RG have a dedicated identities RG, or do we create one? | User | Step 0f / step 4 |
-| Q5 | Per-service Maven profile names — is it always `<service>-azure`? | Inspect each fork during Phase 5 (partition known: `partition-azure`) | Captured as `MAVEN_PROFILE` repo variable during onboarding |
+| Q5 (resolved) | Per-service Maven profile — is it always `<service>-azure`? | **Answered:** the provider profile id is `azure` (not `<service>-azure`); `core` is `activeByDefault`, so the build value is `core,azure`, uniform across 9/10 forks. `indexer-queue` has no provider profiles (default `<modules>`); `entitlements` builds `provider/entitlements-v2-azure`. | Hardcoded `core,azure` default + optional `MAVEN_PROFILE` / `SERVICE_TARGET_JAR` overrides (ADR-035 / ADR-037) |
 | Q8 | Are integration tests fast enough to run on every PR (<10min)? | Measured in Phase 0 step 7 (partition); each service measures during Phase 5 onboarding | Step 7 |
 | Q8-contingency | **If runtime exceeds budget**, the documented fallback (do not redesign the pipeline; pick one): (**a**) per-PR runs a tagged smoke subset via Maven `-Dgroups=...` (or surefire `<includes>`), full suite runs on merge-to-main as a separate non-blocking workflow; (**b**) per-PR deploy + sample probe (a handful of API calls against gateway), full suite runs nightly on a scheduled workflow. Decision is per-service — partition may afford (a), a slower service may need (b). | Operator at Phase 5 onboarding time | Captured in `cicd-poc-notes.md` per service |
 | **Q9 (new)** | What AKS auth mode is the spi-stack cluster using (Entra-managed, local-accounts-disabled, Workload Identity SA passthrough)? Determines K8s RoleBinding syntax. | User / inspect cluster | Step 0b |
