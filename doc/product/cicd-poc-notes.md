@@ -86,12 +86,26 @@ Actions variable / secret **name** that carries them; values are not committed.
   acceptance-test suite.
 - **Resolution:** Pending — inspect the partition repo's acceptance tests; track separately.
 
-### Step 4a — OIDC smoke test ⏳ Blocked
+### Step 4a — OIDC smoke test ⏳ Workflow available (validation pending on partition)
 
 - **Question:** Does the federated-credential path work for every event subject?
-- **Finding:** `.github/template-workflows/oidc-smoke-test.yml` does not exist yet (sub-issue #11).
-- **Resolution:** Blocked on #11. Issuer is captured as `AKS_OIDC_ISSUER_URL`; once the workflow
-  lands, re-run for each event subject (main push, feature push, PR sync, tag push).
+- **Finding:** `.github/template-workflows/oidc-smoke-test.yml` now exists (sub-issue #11).
+  The workflow validates branch and tag OIDC subjects; it explicitly does **not** cover the
+  `pull_request` subject (that is exercised by `validate.yml` on a real PR once W5b lands).
+- **Resolution:** Dispatch the workflow from each ref you need to certify:
+  1. Navigate to **Actions → OIDC Smoke Test → Run workflow** in the fork.
+  2. Select the branch (e.g. `main`) or tag (e.g. `v0.1.0`) from the GitHub UI ref picker.
+  3. A successful run confirms the federated credential subject
+     `repo:<org>/<repo>:ref:refs/heads/<branch>` (or `refs/tags/<tag>`) is correctly configured.
+  4. On failure, the workflow prints the exact subject claim that needs to be registered — use
+     that string to add or correct the federated credential in the Azure portal or via the CLI.
+  Required **secrets** (consumed by `azure/login`): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+  `AZURE_SUBSCRIPTION_ID`.
+  Required **variables** (consumed by the AKS steps): `AKS_RESOURCE_GROUP`, `AKS_CLUSTER_NAME`.
+  Also set as **variables** (for failure diagnostics — secrets are masked in logs, per design §6.1):
+  `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`.
+  Optional variable: `K8S_NAMESPACE` (namespace the workflow checks; defaults to `osdu`).
+  Issuer is captured as `AKS_OIDC_ISSUER_URL` (value stored outside git).
 
 ## Flux steady state — action taken
 
