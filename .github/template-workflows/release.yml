@@ -39,6 +39,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
+      # Manifest config (.release-please-config.json) emits path-prefixed outputs; fall back to top-level.
+      version: ${{ steps.release.outputs['.--version'] || steps.release.outputs.version }}
     permissions:
       contents: write
       pull-requests: write
@@ -111,4 +113,46 @@ jobs:
             --notes "${RELEASE_NOTES}
 
             Upstream Version: ${UPSTREAM_VERSION}
-            Correlation Tag: ${CORRELATION_TAG}" 
+            Correlation Tag: ${CORRELATION_TAG}"
+
+  retag-image:
+    name: "🏷️ Tag Release Image"
+    needs: [check-initialization, release-please]
+    # Gate on version presence (robust to manifest-prefixed vs top-level release-please outputs).
+    if: needs.check-initialization.outputs.initialized == 'true' && needs.release-please.outputs.version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write         # registry-side retag of the already-pushed image
+    steps:
+      - name: "Log in to GHCR"
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Tag release image with semver"
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+          SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          # Registry-side retag: add :<version> to the image already pushed for this commit
+          # (validate.yml's docker-push tags :main-snapshot on the same push to main). No rebuild.
+          OWNER_LC=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          SERVICE=$(printf '%s' "${SERVICE_NAME:-$REPO_NAME}" | tr '[:upper:]' '[:lower:]')
+          REPO="ghcr.io/${OWNER_LC}/${SERVICE}"
+          SRC="${REPO}:main-snapshot"
+
+          # docker-push (validate.yml) races this workflow on push-to-main; retry the source lookup.
+          for attempt in 1 2 3 4 5; do
+            if docker buildx imagetools inspect "$SRC" >/dev/null 2>&1; then break; fi
+            echo "Source ${SRC} not present yet (attempt ${attempt}/5); waiting…"
+            sleep 20
+          done
+
+          docker buildx imagetools create --tag "${REPO}:${VERSION}" "$SRC"
+          echo "Tagged \`${REPO}:${VERSION}\` from \`${SRC}\`" >> "$GITHUB_STEP_SUMMARY" 
