@@ -52,8 +52,10 @@ runs:
       id: build
       shell: bash
       run: |
-        # Set up Maven CLI options
-        MAVEN_CLI_OPTS="--batch-mode -Drevision=${GITHUB_REF_NAME}-SNAPSHOT"
+        # Set up Maven CLI options.
+        # GITHUB_REF_NAME is "<n>/merge" on pull_request events; '/' is invalid in a Maven version.
+        SAFE_REF="${GITHUB_REF_NAME//\//-}"
+        MAVEN_CLI_OPTS="--batch-mode -Drevision=${SAFE_REF}-SNAPSHOT"
         
         # Add settings file if it exists
         if [ -f ".mvn/community-maven.settings.xml" ]; then
@@ -72,8 +74,9 @@ runs:
         fi
 
         if [[ "${{ inputs.generate_coverage }}" == "true" ]]; then
-          # Run build with coverage
-          mvn $MAVEN_CLI_OPTS clean test org.jacoco:jacoco-maven-plugin:0.8.11:report
+          # Run build with coverage. Use `package` (not `test`) so the JARs are produced
+          # alongside coverage — the docker-build job downloads build-artifacts on PR events.
+          mvn $MAVEN_CLI_OPTS clean package org.jacoco:jacoco-maven-plugin:0.8.11:report
           
           # Generate coverage summary
           echo "# Test Coverage Report" >> $GITHUB_STEP_SUMMARY

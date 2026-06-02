@@ -239,6 +239,104 @@ jobs:
         with:
           generate_coverage: ${{ github.event_name == 'pull_request' }}
           gitlab_token: ${{ secrets.GITLAB_TOKEN }}
+          maven_profile: ${{ vars.MAVEN_PROFILE }}
+
+  docker-build:
+    name: "🐳 Docker Build"
+    needs: [check-initialization, check-repo-state, java-build]
+    if: needs.java-build.outputs.build_result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read          # no packages: write — runs untrusted Dockerfile content
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          # For pull_request_target, check out the PR head to validate the actual Dockerfile
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: "Restore local actions for sync PRs"
+        if: |
+          github.event_name == 'pull_request_target' &&
+          github.event.pull_request.base.ref == 'fork_upstream' &&
+          startsWith(github.event.pull_request.head.ref, 'sync/')
+        run: |
+          set -euo pipefail
+          # Sync branches contain only upstream content and don't have local actions.
+          # Restore .github/actions/ from main branch to enable validation.
+          # This also provides security hardening - we always use trusted actions for validation.
+          echo "🔧 Restoring local actions from main branch for sync PR validation..."
+          if ! git fetch origin main --depth=1; then
+            echo "❌ Failed to fetch 'main' branch from origin. Cannot restore local actions."
+            exit 1
+          fi
+          if ! git checkout origin/main -- .github/actions/; then
+            echo "❌ Failed to restore .github/actions/ from origin/main. Cannot proceed with validation."
+            exit 1
+          fi
+          echo "✅ Local actions restored - validation can proceed"
+
+      - name: "Docker Build (validate-only)"
+        uses: ./.github/actions/docker-build
+        with:
+          push: 'false'                       # validates the Dockerfile compiles; no GHCR login/push
+          image_name: ${{ vars.SERVICE_NAME }}
+
+  docker-push:
+    name: "🐳 Docker Push"
+    needs: [check-initialization, check-repo-state, java-build, docker-build]
+    # §5.5 trust boundary (ADR-036): push to GHCR only on trusted events. The force_full_pipeline
+    # arm is declared by W13 (#19); until then it evaluates null and is harmless.
+    if: |
+      (
+        needs.java-build.outputs.build_result == 'success' &&
+        github.actor != 'dependabot[bot]' &&
+        github.event_name != 'pull_request_target' &&
+        (github.event_name != 'pull_request' ||
+         github.event.pull_request.head.repo.full_name == github.repository)
+      ) || (
+        github.event_name == 'workflow_dispatch' &&
+        inputs.force_full_pipeline == true
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write         # only this job has registry write
+    outputs:
+      image_repository: ${{ steps.push.outputs.image_repository }}
+      image_digest: ${{ steps.push.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: "Restore local actions for sync PRs"
+        if: |
+          github.event_name == 'pull_request_target' &&
+          github.event.pull_request.base.ref == 'fork_upstream' &&
+          startsWith(github.event.pull_request.head.ref, 'sync/')
+        run: |
+          set -euo pipefail
+          # Sync branches contain only upstream content and don't have local actions.
+          # Restore .github/actions/ from main branch to enable validation.
+          # This also provides security hardening - we always use trusted actions for validation.
+          echo "🔧 Restoring local actions from main branch for sync PR validation..."
+          if ! git fetch origin main --depth=1; then
+            echo "❌ Failed to fetch 'main' branch from origin. Cannot restore local actions."
+            exit 1
+          fi
+          if ! git checkout origin/main -- .github/actions/; then
+            echo "❌ Failed to restore .github/actions/ from origin/main. Cannot proceed with validation."
+            exit 1
+          fi
+          echo "✅ Local actions restored - validation can proceed"
+
+      - name: "Docker Build and Push"
+        id: push
+        uses: ./.github/actions/docker-build
+        with:
+          push: 'true'
+          image_name: ${{ vars.SERVICE_NAME }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   code-validation:
     name: "✅ Code Quality Checks"
