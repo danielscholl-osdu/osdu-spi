@@ -96,7 +96,7 @@ apply_ruleset() {
     RULESET_SUCCESS=false
     return
   fi
-  local name payload existing_id
+  local name payload existing_id resp
   name="$(jq -r '.name' "$config_file")"
   payload="$(build_payload "$config_file")"
   existing_id="$(gh api "repos/${REPO_FULL_NAME}/rulesets" --jq ".[] | select(.name == \"$name\") | .id" 2>/dev/null | head -n1 || echo "")"
@@ -108,18 +108,18 @@ apply_ruleset() {
   fi
 
   if [[ -n "$existing_id" ]]; then
-    if echo "$payload" | gh api --method PUT -H "Accept: application/vnd.github+json" \
-        "repos/${REPO_FULL_NAME}/rulesets/${existing_id}" --input - >/dev/null 2>&1; then
+    if resp="$(echo "$payload" | gh api --method PUT -H "Accept: application/vnd.github+json" \
+        "repos/${REPO_FULL_NAME}/rulesets/${existing_id}" --input - 2>&1)"; then
       echo "✅ Updated '$name' ruleset (id $existing_id)"
     else
-      echo "⚠️ Failed to update '$name' ruleset"; RULESET_SUCCESS=false
+      echo "⚠️ Failed to update '$name' ruleset: $resp"; RULESET_SUCCESS=false
     fi
   else
-    if echo "$payload" | gh api --method POST -H "Accept: application/vnd.github+json" \
-        "repos/${REPO_FULL_NAME}/rulesets" --input - >/dev/null 2>&1; then
+    if resp="$(echo "$payload" | gh api --method POST -H "Accept: application/vnd.github+json" \
+        "repos/${REPO_FULL_NAME}/rulesets" --input - 2>&1)"; then
       echo "✅ Created '$name' ruleset"
     else
-      echo "⚠️ Failed to create '$name' ruleset"; RULESET_SUCCESS=false
+      echo "⚠️ Failed to create '$name' ruleset: $resp"; RULESET_SUCCESS=false
     fi
   fi
 }

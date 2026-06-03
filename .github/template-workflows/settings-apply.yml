@@ -58,7 +58,10 @@ jobs:
 
       - name: "Reconcile GHCR visibility"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}           # packages: write — same path the docker-build action uses
+          # Org package-visibility changes need an admin token; the default GITHUB_TOKEN can push
+          # but not flip visibility (GitHub masks the denial as 404). The docker-build action's
+          # post-push flip is best-effort under GITHUB_TOKEN; this is the authoritative reconcile.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DRY: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
         run: |
           bash .github/scripts/settings-apply/reconcile-ghcr-visibility.sh \
