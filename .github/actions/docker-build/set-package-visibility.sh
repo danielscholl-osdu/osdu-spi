@@ -6,7 +6,7 @@
 # spi-stack AKS cluster can pull it without an imagePullSecret (ADR-033).
 #
 # GHCR exposes NO REST API to change package visibility (GET/DELETE only).
-# Visibility is governed by the org default (Org → Settings → Packages) and is
+# Visibility is governed by the owner's default package visibility and is
 # sticky once set, so this verifies and reports an actionable remediation rather
 # than calling a nonexistent endpoint. SOFT-FAIL: never fails the build.
 #
@@ -15,7 +15,7 @@
 #   $2 - package name == image name (e.g. partition)
 #
 # Environment:
-#   GITHUB_TOKEN - token with package admin scope (passed by the action's push path)
+#   GITHUB_TOKEN - token with package read scope (passed by the action's push path)
 #
 # Local usage:
 #   GITHUB_TOKEN=*** ./set-package-visibility.sh danielscholl-osdu partition
@@ -33,7 +33,7 @@ ORG="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
 PACKAGE_NAME="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-  echo "⚠️  GITHUB_TOKEN not set; skipping visibility flip. Run 'gh workflow run settings-apply.yml' to reconcile."
+  echo "⚠️  GITHUB_TOKEN not set; skipping visibility check."
   exit 0
 fi
 
@@ -52,7 +52,7 @@ fi
 # Read current visibility; an empty result means the package is missing or unreadable (skip silently)
 CURRENT="$(gh api "${BASE}/packages/container/${PACKAGE_NAME}" --jq '.visibility' 2>/dev/null || echo "")"
 if [[ -z "$CURRENT" ]]; then
-  echo "ℹ Package ${ORG}/${PACKAGE_NAME} not found or not readable; skipping visibility flip."
+  echo "ℹ Package ${ORG}/${PACKAGE_NAME} not found or not readable; skipping visibility check."
   exit 0
 fi
 
@@ -65,6 +65,6 @@ fi
 echo "⚠️  Package ${ORG}/${PACKAGE_NAME} is '${CURRENT}', not public — cluster pulls will fail with ErrImagePull."
 echo "    GHCR has no API to change visibility. Make it public once (sticky) at:"
 echo "    ${SETTINGS_URL}"
-echo "    Set the org default package visibility to Public so future packages are born public."
+echo "    Set the owner's default package visibility to Public so future packages are born public."
 
 exit 0

@@ -6,7 +6,7 @@
 # here on the settings-apply cadence for existing forks.
 #
 # GHCR exposes NO REST API to change package visibility (GET/DELETE only). Visibility
-# is governed by the org default (Org → Settings → Packages) and is sticky once set,
+# is governed by the owner's default package visibility and is sticky once set,
 # so this is a read-only verify that reports a fix; it never hard-blocks (soft-fail).
 #
 # Arguments:
@@ -27,7 +27,7 @@ PACKAGE_NAME="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
 export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 
 if [[ -z "${GH_TOKEN:-}" ]]; then
-  echo "⚠️  No token set; skipping visibility reconcile."; exit 0
+  echo "⚠️  No token set; skipping visibility check."; exit 0
 fi
 
 # Org packages live under /orgs/<org>/...; a user's own packages under /user/... (read-write).
@@ -50,5 +50,5 @@ fi
 echo "⚠️  Package ${ORG}/${PACKAGE_NAME} is '${CURRENT}', not public — cluster pulls will fail with ErrImagePull."
 echo "    GHCR has no API to change visibility. Make it public once (sticky) at:"
 echo "    ${SETTINGS_URL}"
-echo "    Set the org default package visibility to Public so future packages are born public."
+echo "    Set the owner's default package visibility to Public so future packages are born public."
 exit 0
