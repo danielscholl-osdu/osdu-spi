@@ -17,6 +17,16 @@
         "path": "build",
         "sync_all": true,
         "description": "Canonical service Dockerfile owned by the engineering system, synced to every fork (ADR-037)"
+      },
+      {
+        "path": ".github/rulesets",
+        "sync_all": true,
+        "description": "Branch-protection rulesets reconciled by settings-apply.yml"
+      },
+      {
+        "path": ".github/scripts/settings-apply",
+        "sync_all": true,
+        "description": "Durable settings-reconciliation helpers called by settings-apply.yml"
       }
     ],
     "files": [
@@ -87,6 +97,14 @@
         {
           "path": ".github/template-workflows/oidc-smoke-test.yml",
           "description": "OIDC federated-credential smoke test for branch and tag subjects (operator tool)"
+        },
+        {
+          "path": ".github/template-workflows/ghcr-retention.yml",
+          "description": "Scheduled GHCR image-tag retention (W11)"
+        },
+        {
+          "path": ".github/template-workflows/settings-apply.yml",
+          "description": "Per-fork settings reconciliation: idempotent rulesets + required-variable check + GHCR visibility"
         }
       ],
       "template_only": [

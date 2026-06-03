@@ -39,6 +39,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
+      # Manifest config (.release-please-config.json) emits path-prefixed outputs; fall back to top-level.
+      version: ${{ steps.release.outputs['.--version'] || steps.release.outputs.version }}
+      tag_name: ${{ steps.release.outputs['.--tag_name'] || steps.release.outputs.tag_name }}
     permissions:
       contents: write
       pull-requests: write
@@ -111,4 +114,52 @@ jobs:
             --notes "${RELEASE_NOTES}
 
             Upstream Version: ${UPSTREAM_VERSION}
-            Correlation Tag: ${CORRELATION_TAG}" 
+            Correlation Tag: ${CORRELATION_TAG}"
+
+  retag-image:
+    name: "🏷️ Tag Release Image"
+    needs: [check-initialization, release-please]
+    # Gate on version presence (robust to manifest-prefixed vs top-level release-please outputs).
+    if: needs.check-initialization.outputs.initialized == 'true' && needs.release-please.outputs.version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write         # registry-side retag of the already-pushed image
+    steps:
+      - name: "Log in to GHCR"
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Tag release image with semver"
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          OWNER: ${{ github.repository_owner }}
+          SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          # Registry-side retag: add :<version> to the release commit's image. No rebuild.
+          OWNER_LC=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          SERVICE=$(printf '%s' "${SERVICE_NAME:-$REPO_NAME}" | tr '[:upper:]' '[:lower:]')
+          REPO="ghcr.io/${OWNER_LC}/${SERVICE}"
+          # Source the immutable :sha-<short> of THIS commit — not the mutable :main-snapshot, which can
+          # still point at the prior commit until validate.yml's concurrent docker-push catches up.
+          SRC="${REPO}:sha-${GITHUB_SHA:0:12}"
+
+          # Wait for the concurrent docker-push (validate.yml, same push to main) to publish this image.
+          found=false
+          for attempt in 1 2 3 4 5 6; do
+            if docker buildx imagetools inspect "$SRC" >/dev/null 2>&1; then found=true; break; fi
+            echo "Source ${SRC} not present yet (attempt ${attempt}/6); waiting for docker-push…"
+            sleep 20
+          done
+          if [ "$found" != "true" ]; then
+            echo "::error::Release image source ${SRC} never appeared; validate.yml docker-push may have failed for this commit."
+            exit 1
+          fi
+
+          docker buildx imagetools create --tag "${REPO}:${VERSION}" "$SRC"
+          echo "Tagged \`${REPO}:${VERSION}\` from \`${SRC}\`" >> "$GITHUB_STEP_SUMMARY" 
