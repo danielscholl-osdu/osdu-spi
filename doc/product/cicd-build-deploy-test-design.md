@@ -468,16 +468,20 @@ The updated `template-workflows/validate.yml` job graph (new jobs marked NEW). P
 ```
 check-initialization
         │
-        ▼
-check-repo-state
+        ├───────────────┐
+        ▼               ▼
+check-repo-state   check-paths   (NEW — should_run? same ignore set as codeql.yml)
+        │               │
+        ▼               │ (should_run == true)
+   java-build ◄─────────┘
         │
-        ├──────────────────────────────┐
-        ▼                              ▼
-   java-build                    code-validation (existing — runs in parallel,
-        │                                          independent of deploy chain)
         ▼
-   docker-build        (NEW — validate-only, runs on every event, no packages:write)
+   docker-build        (NEW — validate-only worker "🐳 Docker Build (validate)", no packages:write)
         │
+        ├──────────────────────────────► docker-build-required
+        │                                 (NEW — required check "🐳 Docker Build"; if: always();
+        │                                  ADR-030 summary job; reports once; passes config-only,
+        │                                  fails on a real build failure)
         ▼
    docker-push         (NEW — gated by §5.5 trust rules, packages:write)
         │
@@ -488,7 +492,7 @@ check-repo-state
 integration-test       (NEW — digest verification, cross-service health probe)
 ```
 
-`code-validation` (commit linting, branch checks) is unchanged and parallel — it does not depend on the deploy chain.
+`code-validation` (commit linting, branch checks) is unchanged and parallel — it does not depend on the deploy chain. The `pull_request` trigger carries **no `paths-ignore`** (W10) so the required `🐳 Docker Build` summary always reports; `check-paths` gates the expensive `java-build`/`docker-build` work so docs/config-only PRs still skip the Maven/Docker steps.
 
 ### 5.5 Workflow trust boundaries
 
@@ -1353,7 +1357,7 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 | Layer | Contents |
 |---|---|
 | Composite actions | `java-build` (`maven_profile` input added — W1), new `docker-build` action (W2) |
-| Workflow wiring | `validate.yml` gains both new build-path jobs (W5a): the validate-only `docker-build` (no `if:` trust-boundary, no `packages: write`, runs on every event including external-fork PRs) and the trusted-only `docker-push` (carries the §5.5 trust-boundary `if:` clause + `packages: write`). No deploy/integration-test jobs yet — those land with W5b in Deploy PR. |
+| Workflow wiring | `validate.yml` gains the new build-path jobs (W5a): the validate-only worker `docker-build` / `🐳 Docker Build (validate)` (no `if:` trust-boundary, no `packages: write`, runs broadly including external-fork PRs) and the trusted-only `docker-push` (carries the §5.5 trust-boundary `if:` clause + `packages: write`). W10 adds a `check-paths` gate + the `docker-build-required` summary job named `🐳 Docker Build` (ADR-030; the required check) and removes `paths-ignore` from the `pull_request` trigger. No deploy/integration-test jobs yet — those land with W5b in Deploy PR. |
 | Other workflows | `release.yml` adds the `:<version>` re-tag step (W7); new `ghcr-retention.yml` scheduled workflow (W11) |
 | Onboarding (fresh forks, fork-side) | `init.yml` / init-helpers gain GHCR visibility flip + `SERVICE_NAME`/`MAVEN_PROFILE` per-service variable bootstrap (ONBOARD-INIT-A). **No retention** (that's W11) and **no separate ruleset extension helper** (existing `setup-rulesets.sh` call from `init-complete.yml` already POSTs the up-to-date `default-branch.json` from W10) |
 | Settings reconciliation (existing forks) | Relocate `setup-rulesets.sh` to durable `.github/scripts/settings-apply/` + make it idempotent (PUT-on-exists); new helpers `check-required-variables.sh` + `reconcile-ghcr-visibility.sh`; new `settings-apply.yml` workflow on schedule + dispatch + ruleset/helper path changes; **`sync-config.json` extended** so the new rulesets dir, helper scripts dir, and workflow actually propagate via template-sync (SETTINGS-APPLY) |
@@ -1399,7 +1403,7 @@ ls Azure/osdu-spi/doc/src/adr/0*.md | tail -10
 **Exit criteria (Build PR):**
 - Build PR merged to `Azure/osdu-spi/main`
 - Template-sync run propagates to existing service forks; their `docker-build` job (and `docker-push` on internal PRs) runs green on the next PR
-- `default-branch.json` ruleset update reaches forks; `🐳 Docker Build` is now a required check (the validate-only job runs on every event so external-fork PRs can satisfy it; `docker-push` skipping on untrusted events is not a required check)
+- `default-branch.json` ruleset update reaches forks; `🐳 Docker Build` is now a required check — satisfied by the `docker-build-required` summary job (ADR-030), which always reports (passing on config-only/docs PRs so they aren't wedged, failing on a real build failure) and so is satisfiable by external-fork PRs too; `docker-push` skipping on untrusted events is not a required check
 - No regression in existing `validate.yml` or `release.yml` behaviour (java-build still runs without `maven_profile` set, release.yml still produces the existing artifacts)
 
 #### 9.5.B Phase 4b — Deploy PR
@@ -1575,11 +1579,11 @@ Questions that have been resolved by this design pass are listed with their reso
 
 ### Appendix A — Workflow YAML Sketches
 
-**A.1. Modified `template-workflows/validate.yml` (excerpt — new jobs only). Per W5a's two-job split, `docker-build` runs on every event without `packages: write` (no privilege-escalation surface on untrusted Dockerfile content). `docker-push` carries the §5.5 trust-boundary `if:` clause and the GHCR write permission; downstream `deploy` / `integration-test` chain off it via `needs:` and replicate the same `if:` as defense-in-depth.**
+**A.1. Modified `template-workflows/validate.yml` (excerpt — new jobs only). Per W5a's two-job split, the validate-only worker `docker-build` runs without `packages: write` (no privilege-escalation surface on untrusted Dockerfile content). W10 adds the `docker-build-required` summary job (ADR-030) as the required `🐳 Docker Build` context. `docker-push` carries the §5.5 trust-boundary `if:` clause and the GHCR write permission; downstream `deploy` / `integration-test` chain off it via `needs:` and replicate the same `if:` as defense-in-depth.**
 
 ```yaml
-  docker-build:
-    name: "🐳 Docker Build"
+  docker-build:                       # validate-only worker — NOT the required context
+    name: "🐳 Docker Build (validate)"
     needs: [check-initialization, check-repo-state, java-build]
     if: needs.java-build.outputs.build_result == 'success'
     runs-on: ubuntu-latest
@@ -1600,6 +1604,16 @@ Questions that have been resolved by this design pass are listed with their reso
           # dockerfile_path defaults to build/Dockerfile (ADR-037)
           build_args: |
             JAR_FILE=provider/${{ vars.SERVICE_NAME }}-azure/target/*-spring-boot.jar
+
+  docker-build-required:              # required check "🐳 Docker Build" (ADR-030 summary job)
+    name: "🐳 Docker Build"
+    needs: [check-initialization, check-repo-state, check-paths, java-build, docker-build]
+    if: always() && github.event_name != 'pull_request_target'   # report once; never on PRT duplicate
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          # pass: uninitialized / config-only / dependabot / non-Java; fail: real java/docker failure
+          ...
 
   docker-push:
     name: "🐳 Docker Push"

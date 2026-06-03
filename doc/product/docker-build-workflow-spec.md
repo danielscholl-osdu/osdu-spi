@@ -44,9 +44,9 @@ on:
         default: false
 ```
 
-> **Abbreviated — illustrative, not the literal trigger block.** This shows only the events relevant to `docker-build` plus the `force_full_pipeline` input. The real `validate.yml` keeps its full trigger surface — `pull_request_target` (the cascade trigger, [ADR-021](../src/adr/021-pull-request-target-trigger-pattern.md)), the `paths-ignore` lists, and its current `workflow_dispatch` inputs (`post_init`, `initialization_complete`). The `force_full_pipeline` input is added by **W13** (not W5a), **alongside** those existing inputs; it does not replace them.
+> **Abbreviated — illustrative, not the literal trigger block.** This shows only the events relevant to `docker-build` plus the `force_full_pipeline` input. The real `validate.yml` keeps its full trigger surface — `pull_request_target` (the cascade trigger, [ADR-021](../src/adr/021-pull-request-target-trigger-pattern.md)) and its current `workflow_dispatch` inputs (`post_init`, `initialization_complete`). The `force_full_pipeline` input is added by **W13** (not W5a), **alongside** those existing inputs; it does not replace them. Note the `pull_request` trigger carries **no `paths-ignore`** (W10): the workflow must always trigger on PRs to a protected branch so the required `🐳 Docker Build` summary check always reports — a path-skipped workflow stays Pending and wedges the PR (ADR-030). `pull_request_target` and `push` retain their `paths-ignore`.
 
-The `docker-build` job itself adds **no additional `if:` guard** beyond `needs.java-build.outputs.build_result == 'success'`. It runs on every qualifying event — including external-fork pull requests — because it performs a validate-only build with no secrets and no registry push.
+The validate-only worker job (`🐳 Docker Build (validate)`) adds **no trust-boundary `if:` guard** beyond `needs.java-build.outputs.build_result == 'success'`. The expensive build is instead gated by a `check-paths` job (`should_run`, the same ignore set as `codeql.yml`) so docs/config-only PRs skip the Maven/Docker work. The **required** `🐳 Docker Build` check is a separate `if: always()` summary job (see *Required check*, below) — the worker runs broadly (including external-fork PRs) but is not itself the required context.
 
 ### Permissions
 
@@ -58,8 +58,8 @@ permissions:
 ### Job block (excerpt from `validate.yml`)
 
 ```yaml
-  docker-build:
-    name: "🐳 Docker Build"
+  docker-build:                          # validate-only worker — NOT the required context
+    name: "🐳 Docker Build (validate)"
     needs: [check-initialization, check-repo-state, java-build]
     if: needs.java-build.outputs.build_result == 'success'
     runs-on: ubuntu-latest
@@ -80,9 +80,22 @@ permissions:
           # dockerfile_path defaults to build/Dockerfile (ADR-037); JAR_FILE points at the java-build artifact
           build_args: |
             JAR_FILE=provider/${{ vars.SERVICE_NAME }}-azure/target/*-spring-boot.jar
+
+  docker-build-required:                 # the required check context "🐳 Docker Build" (ADR-030)
+    name: "🐳 Docker Build"
+    needs: [check-initialization, check-repo-state, check-paths, java-build, docker-build]
+    if: always() && github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Report Docker Build Status"
+        run: |
+          # Passes for uninitialized / config-only / dependabot / non-Java; fails only on a real
+          # java-build or docker-build failure. Suppressed on pull_request_target so the dual
+          # trigger reports this context exactly once.
+          ...
 ```
 
-> **Note:** action references in this excerpt are shown by tag for readability. In the real `validate.yml`, pin every third-party action to a full commit SHA with a `# vX.Y.Z` comment (repo convention).
+> **Note:** action references in this excerpt are shown by tag for readability. In the real `validate.yml`, pin every third-party action to a full commit SHA with a `# vX.Y.Z` comment (repo convention). The summary-job body is abbreviated here — see `validate.yml` for the full result-evaluation script.
 
 ## Composite Action Contract
 
@@ -133,10 +146,13 @@ Tags are documentation artefacts. Deployment always uses the digest reference.
 flowchart TD
     A[validate.yml trigger] --> B[check-initialization]
     B --> C[check-repo-state]
+    B --> P[check-paths\nshould_run?]
     C --> D[java-build]
-    D -->|build_result == success| E[docker-build\nvalidate-only compile\nevery event]
+    P -->|should_run == true| D
+    D -->|build_result == success| E["docker-build (validate)\nvalidate-only compile"]
     D -->|build_result == success\n+ trust-boundary if:| F[docker-push\npackages:write\ninternal events only]
-    E --> G[Required check satisfied\n🐳 Docker Build]
+    E --> G["docker-build-required (if: always)\nRequired check 🐳 Docker Build"]
+    P --> G
     F --> H[deploy\nDeploy PR / W5b]
     H --> I[integration-test\nDeploy PR / W5b]
 ```
@@ -146,9 +162,12 @@ flowchart TD
 ```mermaid
 graph TD
     A[check-initialization] --> D[java-build]
+    A --> P[check-paths]
     B[check-repo-state] --> D
-    D -->|every event| E[docker-build]
+    P -->|should_run| D
+    D --> E["docker-build (validate)"]
     D -->|trusted events| F[docker-push]
+    E --> R["docker-build-required\n🐳 Docker Build"]
     F -->|Deploy PR| G[deploy]
     G -->|Deploy PR| H[integration-test]
 ```
@@ -159,7 +178,7 @@ graph TD
 |---------|---------|------------|
 | `build/Dockerfile` missing | Job fails at the Docker build step | The canonical Dockerfile syncs from the template (ADR-037); confirm template-sync delivered `build/Dockerfile` to the fork |
 | `JAR_FILE` glob matches no file | Docker `COPY` fails | The java-build artifact path differs from `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar`; set the `SERVICE_TARGET_JAR` repository variable to the correct path |
-| JAR artifact missing (java-build skipped or failed) | `docker-build` job is skipped via `needs: java-build` dependency | Fix the java-build failure; docker-build re-runs automatically |
+| JAR artifact missing (java-build skipped or failed) | `docker-build (validate)` worker is skipped, and the `docker-build-required` summary check reports **failure** when `java-build` failed | Fix the java-build failure; both re-run automatically |
 | GHCR push fails — rate limit or transient network | `docker-push` job fails | Re-run the failed job; GHCR push is idempotent |
 | Image too large (>1 GB) | Warning surfaced in job summary | Not blocking in initial rollout; investigate multi-stage Dockerfile optimisation |
 | First-time push — package created private | `docker-push` succeeds; downstream deploy fails with `ErrImagePull` | The action attempts an immediate public-visibility flip after push; `init.yml` reconciles visibility for fresh forks; `settings-apply.yml` reconciles for existing forks on schedule |
@@ -194,7 +213,7 @@ See the [parent design doc §5.5](./cicd-build-deploy-test-design.md#55-workflow
 
 ### validate.yml
 
-`docker-build` is a required check (`🐳 Docker Build` in the branch ruleset — W10 first pass). Because the job runs on every event including external-fork PRs, external contributors can satisfy the required check without holding a trusted identity.
+`🐳 Docker Build` is a required check in the branch ruleset (W10 first pass). The required context is **not** the validate-only worker (`🐳 Docker Build (validate)`) but a separate `if: always()` summary job, `docker-build-required` (ADR-030 summary-job pattern, mirroring the `CodeQL` summary job). This is necessary because requiring the worker directly fails three ways: a path-skipped *workflow* leaves the context Pending (wedges docs/config-only PRs — hence `pull_request` carries no `paths-ignore`); a conditionally-skipped *job* reports Success (so a failed `java-build` → skipped `docker-build` would falsely pass); and the dual `pull_request`/`pull_request_target` trigger reports each job name twice. The summary job collapses these into one always-reporting context: it passes for uninitialized / config-only / non-Java / dependabot PRs, fails only on a real `java-build`/`docker-build` failure, and is suppressed on `pull_request_target` so it reports exactly once. Because the worker still runs broadly (including external-fork PRs), external contributors can satisfy the required check without holding a trusted identity.
 
 ### release.yml
 
