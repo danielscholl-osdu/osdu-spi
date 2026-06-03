@@ -50,7 +50,7 @@ jobs:
     steps:
       - name: "Generate GitHub App Token"
         id: app-token
-        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42  # v2.1.4
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -73,7 +73,7 @@ jobs:
     steps:
       - name: Generate GitHub App Token
         id: app-token
-        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42  # v2.1.4
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -127,7 +127,7 @@ jobs:
       packages: write         # registry-side retag of the already-pushed image
     steps:
       - name: "Log in to GHCR"
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
