@@ -395,9 +395,9 @@ jobs:
 
   code-validation:
     name: "✅ Code Quality Checks"
-    needs: [check-initialization, check-repo-state, java-build]
+    needs: [check-initialization, check-repo-state, check-paths, java-build]
     if: |
-      always() && 
+      always() &&
       needs.check-initialization.outputs.initialized == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -518,6 +518,10 @@ jobs:
             if [[ "${{ needs.check-repo-state.outputs.is_java_repo }}" == "true" ]]; then
               if [[ "${{ needs.java-build.result }}" == "success" ]]; then
                 ITEMS=$(echo "$ITEMS" | jq '. + ["✓ Java Build Successful"]')
+              elif [[ "${{ needs.java-build.result }}" == "skipped" && "${{ needs.check-paths.outputs.should_run }}" == "false" ]]; then
+                # Build gated out by check-paths: only config/docs paths changed, nothing to build.
+                # A skip for any other reason (e.g. check-paths itself failed) falls through to "Failed".
+                ITEMS=$(echo "$ITEMS" | jq '. + ["ℹ️ Java Build Skipped (no build-relevant changes)"]')
               else
                 ITEMS=$(echo "$ITEMS" | jq '. + ["❌ Java Build Failed"]')
               fi
