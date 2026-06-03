@@ -65,8 +65,8 @@ export GH_TOKEN
 deploy_ready() {
   local ready=true name
   local secret_names variable_names
-  secret_names="$(gh api "repos/${REPO_FULL_NAME}/actions/secrets" --jq '.secrets[].name' 2>/dev/null || echo "")"
-  variable_names="$(gh api "repos/${REPO_FULL_NAME}/actions/variables" --jq '.variables[].name' 2>/dev/null || echo "")"
+  secret_names="$(gh api --paginate "repos/${REPO_FULL_NAME}/actions/secrets" --jq '.secrets[].name' 2>/dev/null || echo "")"
+  variable_names="$(gh api --paginate "repos/${REPO_FULL_NAME}/actions/variables" --jq '.variables[].name' 2>/dev/null || echo "")"
   grep -qx "AZURE_CLIENT_ID" <<< "$secret_names" || ready=false
   for name in ACCEPTANCE_TEST_DIR ACCEPTANCE_TEST_SECRET_MAP ACCEPTANCE_TEST_DEPENDENCIES K8S_DEPLOYMENT_NAME K8S_CONTAINER_NAME; do
     grep -qx "$name" <<< "$variable_names" || ready=false

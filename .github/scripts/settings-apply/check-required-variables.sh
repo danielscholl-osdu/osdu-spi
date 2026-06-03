@@ -34,8 +34,8 @@ export GH_TOKEN="${GH_TOKEN:-}"
 
 ISSUE_TITLE="⚙️ Deploy onboarding: required CI configuration missing"
 
-secret_names="$(gh api "repos/${REPO}/actions/secrets" --jq '.secrets[].name' 2>/dev/null || echo "")"
-variable_names="$(gh api "repos/${REPO}/actions/variables" --jq '.variables[].name' 2>/dev/null || echo "")"
+secret_names="$(gh api --paginate "repos/${REPO}/actions/secrets" --jq '.secrets[].name' 2>/dev/null || echo "")"
+variable_names="$(gh api --paginate "repos/${REPO}/actions/variables" --jq '.variables[].name' 2>/dev/null || echo "")"
 
 missing=()
 have_secret() { grep -qx "$1" <<< "$secret_names"; }
