@@ -51,9 +51,10 @@ if [[ "$DRY_RUN" == "true" ]]; then
   echo "DRY-RUN would set ${ORG}/${PACKAGE_NAME} visibility ${CURRENT} -> public"; exit 0
 fi
 
-if gh api -X PATCH "${BASE}/packages/container/${PACKAGE_NAME}/visibility" -f visibility=public >/dev/null 2>&1; then
+if resp="$(gh api -X PATCH "${BASE}/packages/container/${PACKAGE_NAME}/visibility" -f visibility=public 2>&1)"; then
   echo "✓ Package ${ORG}/${PACKAGE_NAME} visibility set to public."
 else
   echo "⚠️  Could not set ${ORG}/${PACKAGE_NAME} to public; cluster pulls may fail with ErrImagePull until fixed."
+  echo "    Response: ${resp}"
 fi
 exit 0
