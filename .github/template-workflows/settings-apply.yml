@@ -56,13 +56,12 @@ jobs:
           DRY: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
         run: bash .github/scripts/settings-apply/check-required-variables.sh "${{ github.repository }}" $DRY
 
-      - name: "Reconcile GHCR visibility"
+      - name: "Verify GHCR visibility"
         env:
-          # Org package-visibility changes need an admin token; the default GITHUB_TOKEN can push
-          # but not flip visibility (GitHub masks the denial as 404). The docker-build action's
-          # post-push flip is best-effort under GITHUB_TOKEN; this is the authoritative reconcile.
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          DRY: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+          # Read-only check. GHCR has no API to change package visibility (verified — 404 on any
+          # token); it is governed by the org default and set once per package. This reports if a
+          # package is unexpectedly not public; the default GITHUB_TOKEN suffices to read it.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash .github/scripts/settings-apply/reconcile-ghcr-visibility.sh \
-            "${{ github.repository_owner }}" "${{ vars.SERVICE_NAME || github.event.repository.name }}" $DRY
+            "${{ github.repository_owner }}" "${{ vars.SERVICE_NAME || github.event.repository.name }}"

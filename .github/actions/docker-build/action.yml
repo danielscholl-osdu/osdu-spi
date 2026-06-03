@@ -110,10 +110,14 @@ runs:
         push: ${{ inputs.push == 'true' }}
         tags: ${{ steps.tags.outputs.docker_tags }}
         build-args: ${{ inputs.build_args }}
+        # Links the package to its repo in the GHCR UI (provenance). Visibility is governed
+        # by the org default, not this label — repo-linkage inherits permissions, not visibility.
+        labels: |
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-    - name: "Ensure package is public"
+    - name: "Verify package visibility"
       if: ${{ inputs.push == 'true' && steps.build.outcome == 'success' }}
       shell: bash
       run: |
