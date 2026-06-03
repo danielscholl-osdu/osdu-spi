@@ -49,7 +49,7 @@ for v in ACCEPTANCE_TEST_DIR ACCEPTANCE_TEST_SECRET_MAP ACCEPTANCE_TEST_DEPENDEN
   have_var "$v" || missing+=("variable \`$v\` — set by the operator")
 done
 
-existing_issue="$(gh issue list --repo "$REPO" --state open --search "in:title \"$ISSUE_TITLE\"" --json number --jq '.[0].number' 2>/dev/null || echo "")"
+existing_issue="$(gh issue list --repo "$REPO" --state open --search "in:title \"$ISSUE_TITLE\"" --json number --jq '.[0].number // empty' 2>/dev/null || echo "")"
 
 if [[ ${#missing[@]} -eq 0 ]]; then
   echo "✅ Deploy-onboarding manifest complete."

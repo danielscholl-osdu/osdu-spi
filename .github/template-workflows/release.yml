@@ -41,6 +41,7 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       # Manifest config (.release-please-config.json) emits path-prefixed outputs; fall back to top-level.
       version: ${{ steps.release.outputs['.--version'] || steps.release.outputs.version }}
+      tag_name: ${{ steps.release.outputs['.--tag_name'] || steps.release.outputs.tag_name }}
     permissions:
       contents: write
       pull-requests: write
@@ -149,11 +150,16 @@ jobs:
           SRC="${REPO}:sha-${GITHUB_SHA:0:12}"
 
           # Wait for the concurrent docker-push (validate.yml, same push to main) to publish this image.
+          found=false
           for attempt in 1 2 3 4 5 6; do
-            if docker buildx imagetools inspect "$SRC" >/dev/null 2>&1; then break; fi
+            if docker buildx imagetools inspect "$SRC" >/dev/null 2>&1; then found=true; break; fi
             echo "Source ${SRC} not present yet (attempt ${attempt}/6); waiting for docker-push…"
             sleep 20
           done
+          if [ "$found" != "true" ]; then
+            echo "::error::Release image source ${SRC} never appeared; validate.yml docker-push may have failed for this commit."
+            exit 1
+          fi
 
           docker buildx imagetools create --tag "${REPO}:${VERSION}" "$SRC"
           echo "Tagged \`${REPO}:${VERSION}\` from \`${SRC}\`" >> "$GITHUB_STEP_SUMMARY" 
