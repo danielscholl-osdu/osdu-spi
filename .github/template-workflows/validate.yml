@@ -551,11 +551,17 @@ jobs:
     steps:
       - name: "Report Docker Build Status"
         run: |
+          # Fail the required check if any validation prerequisite genuinely failed/cancelled — a
+          # broken validation pipeline must not pass as "skipped". A *skipped* prerequisite is
+          # legitimate (wrong-event dedup or an uninitialized repo) and is handled by the output
+          # checks below, which is why we test result == failure/cancelled, not result != success.
+          if [ "${{ needs.check-initialization.result }}" = "failure" ] || [ "${{ needs.check-initialization.result }}" = "cancelled" ] || \
+             [ "${{ needs.check-repo-state.result }}" = "failure" ] || [ "${{ needs.check-repo-state.result }}" = "cancelled" ] || \
+             [ "${{ needs.check-paths.result }}" = "failure" ] || [ "${{ needs.check-paths.result }}" = "cancelled" ]; then
+            echo "❌ A validation prerequisite job failed or was cancelled"; exit 1
+          fi
           if [ "${{ needs.check-initialization.outputs.initialized }}" != "true" ]; then
             echo "✅ Docker Build skipped - repository not yet initialized"; exit 0
-          fi
-          if [ "${{ needs.check-paths.result }}" != "success" ]; then
-            echo "❌ Path check failed"; exit 1
           fi
           if [ "${{ needs.check-paths.outputs.should_run }}" = "false" ]; then
             echo "✅ Docker Build skipped - only configuration/docs files changed"; exit 0
