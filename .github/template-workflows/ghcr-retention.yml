@@ -48,7 +48,8 @@ jobs:
 
           echo "Package: ${OWNER_LC}/${PKG}  (base: ${BASE}, dry_run: ${DRY_RUN})"
 
-          VERSIONS="$(gh api --paginate "${BASE}/packages/container/${PKG}/versions" 2>/dev/null | jq -s 'add // []')"
+          # New/empty forks have no package yet; a failed read must yield [] (not abort under set -e).
+          VERSIONS="$(gh api --paginate "${BASE}/packages/container/${PKG}/versions" 2>/dev/null | jq -s 'add // []' || echo '[]')"
           COUNT="$(echo "$VERSIONS" | jq 'length')"
           if [ "$COUNT" -eq 0 ]; then
             echo "No versions found for ${OWNER_LC}/${PKG}; nothing to do."
