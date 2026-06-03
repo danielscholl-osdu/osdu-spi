@@ -38,6 +38,9 @@
         "required_status_checks": [
           {
             "context": "CodeQL"
+          },
+          {
+            "context": "🐳 Docker Build"
           }
         ]
       }

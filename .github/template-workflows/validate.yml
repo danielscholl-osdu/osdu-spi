@@ -1,24 +1,11 @@
 name: Validation
 
 on:
+  # No paths-ignore here: validate.yml must always trigger on PRs to a protected branch so the
+  # required "🐳 Docker Build" summary check always reports (a path-skipped workflow stays Pending
+  # and wedges the PR; a path-skipped heavy job is gated below via check-paths instead). ADR-030.
   pull_request:
     branches: [main, fork_integration, fork_upstream]
-    paths-ignore:
-      - '.github/workflows/**'
-      - '.github/template-workflows/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/actions/**'
-      - '.github/*.md'
-      - '.github/*.json'
-      - '.github/*.yml'
-      - '.github/*.yaml'
-      - '.github/.template-sync-commit'
-      - '.vscode/**'
-      - 'docs/**'
-      - '**.md'
-      - '**.txt'
-      - 'LICENSE'
-      - 'NOTICE'
   pull_request_target:
     branches: [main, fork_integration, fork_upstream]
     types: [opened, synchronize, reopened]
@@ -169,13 +156,66 @@ jobs:
             echo "is_java=false" >> $GITHUB_OUTPUT
           fi
 
+  check-paths:
+    name: "🔍 Check for Build-Relevant Changes"
+    needs: check-initialization
+    if: needs.check-initialization.outputs.initialized == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.filter.outputs.should_run }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          # For pull_request_target, diff against the PR head; pull_request resolves to the merge sha.
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: "Check for build-relevant changes"
+        id: filter
+        run: |
+          # push / workflow_dispatch always count as build-relevant.
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "Build-relevant: ${{ github.event_name }} trigger"
+            exit 0
+          fi
+
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" || echo "")
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "Build-relevant: unable to determine changed files"
+            exit 0
+          fi
+
+          # Same ignore set as codeql.yml so both required checks agree on "config-only".
+          SHOULD_RUN=false
+          while IFS= read -r file; do
+            if echo "$file" | grep -qE '^(\.github/|\.mvn/|devops/|docs/|\..*|.*\.md)$'; then
+              continue
+            fi
+            SHOULD_RUN=true
+            break
+          done <<< "$CHANGED_FILES"
+
+          echo "should_run=$SHOULD_RUN" >> $GITHUB_OUTPUT
+          if [ "$SHOULD_RUN" = "true" ]; then
+            echo "Build-relevant: code changes detected"
+          else
+            echo "Skipping build: only config/docs paths changed"
+          fi
+
   java-build:
     name: "🔨 Java Build"
-    needs: [check-initialization, check-repo-state]
+    needs: [check-initialization, check-repo-state, check-paths]
     # Skip java-build for Dependabot PRs (handled by dependabot-validation.yml)
+    # and for docs/config-only PRs (check-paths.should_run == 'false').
     if: |
       needs.check-repo-state.outputs.is_initialized == 'true' &&
       needs.check-repo-state.outputs.is_java_repo == 'true' &&
+      needs.check-paths.outputs.should_run == 'true' &&
       github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     outputs:
@@ -244,7 +284,9 @@ jobs:
           maven_profile: ${{ vars.MAVEN_PROFILE || 'core,azure' }}
 
   docker-build:
-    name: "🐳 Docker Build"
+    # Validate-only worker. NOT the required check — the required "🐳 Docker Build" context is the
+    # summary job below (docker-build-required), which reports once even when this job is skipped.
+    name: "🐳 Docker Build (validate)"
     needs: [check-initialization, check-repo-state, java-build]
     if: needs.java-build.outputs.build_result == 'success'
     runs-on: ubuntu-latest
@@ -496,3 +538,44 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           pr_number: ${{ github.event.pull_request.number }}
           status_items: ${{ steps.status.outputs.items }}
+
+  docker-build-required:
+    # Required branch-protection check "🐳 Docker Build" (ADR-030 summary-job pattern, mirrors the
+    # CodeQL summary job). Consolidates the validate-only build into one always-reporting context so
+    # the required check never wedges (config-only/non-Java/dependabot/uninitialized all pass) and a
+    # real build failure blocks. Suppressed on pull_request_target so the dual trigger reports it once.
+    name: "🐳 Docker Build"
+    needs: [check-initialization, check-repo-state, check-paths, java-build, docker-build]
+    if: always() && github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Report Docker Build Status"
+        run: |
+          # Fail the required check if any validation prerequisite genuinely failed/cancelled — a
+          # broken validation pipeline must not pass as "skipped". A *skipped* prerequisite is
+          # legitimate (wrong-event dedup or an uninitialized repo) and is handled by the output
+          # checks below, which is why we test result == failure/cancelled, not result != success.
+          if [ "${{ needs.check-initialization.result }}" = "failure" ] || [ "${{ needs.check-initialization.result }}" = "cancelled" ] || \
+             [ "${{ needs.check-repo-state.result }}" = "failure" ] || [ "${{ needs.check-repo-state.result }}" = "cancelled" ] || \
+             [ "${{ needs.check-paths.result }}" = "failure" ] || [ "${{ needs.check-paths.result }}" = "cancelled" ]; then
+            echo "❌ A validation prerequisite job failed or was cancelled"; exit 1
+          fi
+          if [ "${{ needs.check-initialization.outputs.initialized }}" != "true" ]; then
+            echo "✅ Docker Build skipped - repository not yet initialized"; exit 0
+          fi
+          if [ "${{ needs.check-paths.outputs.should_run }}" = "false" ]; then
+            echo "✅ Docker Build skipped - only configuration/docs files changed"; exit 0
+          fi
+          if [ "${{ github.actor }}" = "dependabot[bot]" ]; then
+            echo "✅ Docker Build skipped - Dependabot build handled by dependabot-validation.yml"; exit 0
+          fi
+          if [ "${{ needs.check-repo-state.outputs.is_java_repo }}" != "true" ]; then
+            echo "✅ Docker Build skipped - non-Java repository"; exit 0
+          fi
+          if [ "${{ needs.java-build.result }}" = "failure" ] || [ "${{ needs.java-build.result }}" = "cancelled" ]; then
+            echo "❌ Java build failed or was cancelled"; exit 1
+          fi
+          if [ "${{ needs.docker-build.result }}" = "failure" ] || [ "${{ needs.docker-build.result }}" = "cancelled" ]; then
+            echo "❌ Docker build failed or was cancelled"; exit 1
+          fi
+          echo "✅ Docker Build checks completed successfully"
