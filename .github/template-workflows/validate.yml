@@ -518,6 +518,9 @@ jobs:
             if [[ "${{ needs.check-repo-state.outputs.is_java_repo }}" == "true" ]]; then
               if [[ "${{ needs.java-build.result }}" == "success" ]]; then
                 ITEMS=$(echo "$ITEMS" | jq '. + ["✓ Java Build Successful"]')
+              elif [[ "${{ needs.java-build.result }}" == "skipped" ]]; then
+                # check-paths gated the build out: only config/docs paths changed, nothing to build.
+                ITEMS=$(echo "$ITEMS" | jq '. + ["ℹ️ Java Build Skipped (no build-relevant changes)"]')
               else
                 ITEMS=$(echo "$ITEMS" | jq '. + ["❌ Java Build Failed"]')
               fi
