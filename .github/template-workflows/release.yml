@@ -150,14 +150,16 @@ jobs:
           SRC="${REPO}:sha-${GITHUB_SHA:0:12}"
 
           # Wait for the concurrent docker-push (validate.yml, same push to main) to publish this image.
+          # A full Maven + Docker build can take many minutes on a cold cache, so poll generously; the
+          # loop breaks the moment the image appears, so a warm build still completes near-instantly.
           found=false
-          for attempt in 1 2 3 4 5 6; do
+          for attempt in $(seq 1 60); do
             if docker buildx imagetools inspect "$SRC" >/dev/null 2>&1; then found=true; break; fi
-            echo "Source ${SRC} not present yet (attempt ${attempt}/6); waiting for docker-push…"
+            echo "Source ${SRC} not present yet (attempt ${attempt}/60); waiting for docker-push…"
             sleep 20
           done
           if [ "$found" != "true" ]; then
-            echo "::error::Release image source ${SRC} never appeared; validate.yml docker-push may have failed for this commit."
+            echo "::error::Release image source ${SRC} did not appear within ~20 min; validate.yml docker-push may have failed for this commit."
             exit 1
           fi
 
