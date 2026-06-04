@@ -27,6 +27,9 @@ inputs:
   build_args:
     description: 'Optional --build-arg values (newline-separated KEY=VALUE). Never pass GITHUB_TOKEN here.'
     required: false
+  jar_file:
+    description: 'Conventional path/glob of the service Spring Boot JAR (default provider/<service>-azure/target/*-spring-boot.jar, from SERVICE_TARGET_JAR or SERVICE_NAME). If it matches no file the action auto-discovers the Azure JAR; SERVICE_TARGET_JAR is only needed to disambiguate a service that builds more than one.'
+    required: false
   push:
     description: 'When true, log in to GHCR, push the image, compute branch (snapshot) tags, and flip package visibility. When false, build only (no registry auth). The caller must set this explicitly per job.'
     required: false
@@ -79,6 +82,16 @@ runs:
         name: ${{ inputs.jar_artifact_name }}
         path: .
 
+    - name: "Resolve service JAR path"
+      id: jar
+      shell: bash
+      # Honours the conventional/override path, else discovers the Azure JAR so a deviant-module
+      # fork (e.g. entitlements-v2-azure) builds with no manual variable (ADR-037).
+      run: "$GITHUB_ACTION_PATH/resolve-jar.sh"
+      env:
+        REQUESTED_JAR: ${{ inputs.jar_file }}
+        IMAGE_NAME: ${{ inputs.image_name }}
+
     - name: "Compute image tags"
       id: tags
       shell: bash
@@ -109,7 +122,9 @@ runs:
         file: ${{ inputs.dockerfile_path }}
         push: ${{ inputs.push == 'true' }}
         tags: ${{ steps.tags.outputs.docker_tags }}
-        build-args: ${{ inputs.build_args }}
+        build-args: |
+          JAR_FILE=${{ steps.jar.outputs.jar_file }}
+          ${{ inputs.build_args }}
         # Links the package to its repo in the GHCR UI (provenance). Visibility is governed
         # by the org default, not this label — repo-linkage inherits permissions, not visibility.
         labels: |
