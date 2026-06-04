@@ -324,11 +324,10 @@ jobs:
         with:
           push: 'false'                       # validates the Dockerfile compiles; no GHCR login/push
           image_name: ${{ vars.SERVICE_NAME || github.event.repository.name }}
-          # SERVICE_NAME falls back to the repo name (== service slug for our bare-named forks); a repo whose
-          # name isn't the slug (e.g. an upstream osdu-spi-* repo) sets SERVICE_NAME. JAR built by java-build
-          # (ADR-037); SERVICE_TARGET_JAR overrides a deviant module path (e.g. provider/entitlements-v2-azure).
-          build_args: |
-            JAR_FILE=${{ vars.SERVICE_TARGET_JAR || format('provider/{0}-azure/target/*-spring-boot.jar', vars.SERVICE_NAME || github.event.repository.name) }}
+          # Conventional JAR path; the docker-build action auto-discovers the Azure JAR when a deviant
+          # module name (e.g. entitlements-v2-azure) doesn't match, so a fresh fork needs no variable.
+          # SERVICE_NAME falls back to the repo name; SERVICE_TARGET_JAR forces a specific path (ADR-037).
+          jar_file: ${{ vars.SERVICE_TARGET_JAR || format('provider/{0}-azure/target/*-spring-boot.jar', vars.SERVICE_NAME || github.event.repository.name) }}
 
   docker-push:
     name: "🐳 Docker Push"
@@ -387,11 +386,10 @@ jobs:
           push: 'true'
           image_name: ${{ vars.SERVICE_NAME || github.event.repository.name }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          # SERVICE_NAME falls back to the repo name (== service slug for our bare-named forks); a repo whose
-          # name isn't the slug (e.g. an upstream osdu-spi-* repo) sets SERVICE_NAME. JAR built by java-build
-          # (ADR-037); SERVICE_TARGET_JAR overrides a deviant module path (e.g. provider/entitlements-v2-azure).
-          build_args: |
-            JAR_FILE=${{ vars.SERVICE_TARGET_JAR || format('provider/{0}-azure/target/*-spring-boot.jar', vars.SERVICE_NAME || github.event.repository.name) }}
+          # Conventional JAR path; the docker-build action auto-discovers the Azure JAR when a deviant
+          # module name (e.g. entitlements-v2-azure) doesn't match, so a fresh fork needs no variable.
+          # SERVICE_NAME falls back to the repo name; SERVICE_TARGET_JAR forces a specific path (ADR-037).
+          jar_file: ${{ vars.SERVICE_TARGET_JAR || format('provider/{0}-azure/target/*-spring-boot.jar', vars.SERVICE_NAME || github.event.repository.name) }}
 
   code-validation:
     name: "✅ Code Quality Checks"

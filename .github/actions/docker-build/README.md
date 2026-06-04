@@ -34,7 +34,8 @@ java-build (uploads build-artifacts) → docker-build (this action)
 | `registry` | No | `ghcr.io` | Container registry host |
 | `org` | No | _(repo owner)_ | Registry org/owner; falls back to the workflow `github.repository_owner` at runtime when omitted |
 | `jar_artifact_name` | No | `build-artifacts` | Name of the artifact containing the built JARs |
-| `build_args` | No | — | Optional `--build-arg` values (newline-separated `KEY=VALUE`). The canonical Dockerfile (ADR-037) requires `JAR_FILE=<path to the java-build JAR>`; `validate.yml` defaults it to `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar` (override with `vars.SERVICE_TARGET_JAR`). **Never pass `GITHUB_TOKEN` here.** |
+| `jar_file` | No | — | Conventional path/glob of the service Spring Boot JAR (`validate.yml` passes `provider/<SERVICE_NAME>-azure/target/*-spring-boot.jar`, from `SERVICE_TARGET_JAR` or `SERVICE_NAME`). If it matches no file the action auto-discovers the Azure JAR (deviant modules like `entitlements-v2-azure`); `SERVICE_TARGET_JAR` only disambiguates a service that builds more than one |
+| `build_args` | No | — | Optional extra `--build-arg` values (newline-separated `KEY=VALUE`). The JAR is passed via `jar_file` (resolved), not here. **Never pass `GITHUB_TOKEN` here.** |
 | `push` | No | `'true'` | `'true'` logs in, pushes, tags, and flips visibility; `'false'` builds only |
 | `github_token` | No | — | Token for GHCR login + visibility flip. Consumed only on the push path |
 
@@ -71,6 +72,7 @@ Deploy references are composed as `${image_repository}@${image_digest}`. The dig
 |--------|------|
 | `compute-metadata.sh` | Lowercases `registry/org/image_name`; emits `short_sha` |
 | `compute-tags.sh` | Emits `image_tags` (comma) + `docker_tags` (newline, for build-push) |
+| `resolve-jar.sh` | Resolves the service JAR: honours the conventional/override path, else auto-discovers the Azure Spring Boot JAR (deviant modules) |
 | `set-package-visibility.sh` | Org/user-aware, idempotent, soft-fail GHCR public flip |
 
 ## Local Testing
