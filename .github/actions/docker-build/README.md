@@ -89,7 +89,7 @@ GITHUB_OUTPUT=/dev/stdout \
 GITHUB_TOKEN=*** ./set-package-visibility.sh danielscholl-osdu partition
 ```
 
-The full action cannot be exercised in this template repository (`validate.yml` path-ignores `.github/actions/**`). End-to-end runtime proof is author-only on the `danielscholl-osdu/partition` fork.
+The full action cannot be exercised in this template repository: a change under `.github/` is treated as config-only by the build's path check, so no Maven/Docker build runs here. End-to-end runtime proof is author-only on the `danielscholl-osdu/partition` fork.
 
 ## Related
 
