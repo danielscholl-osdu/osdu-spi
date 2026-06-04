@@ -10,16 +10,37 @@
 # fresh fork builds with no manual variable and no first failure. SERVICE_TARGET_JAR is
 # needed only to disambiguate a service that builds more than one Azure Spring Boot JAR.
 #
+# Paths resolve relative to BUILD_CONTEXT: the Dockerfile COPY is context-relative and the
+# build artifacts download into the context, so the emitted path must be context-relative too.
+#
 # Environment:
-#   REQUESTED_JAR  conventional path or override glob, relative to the build context
-#   IMAGE_NAME     service slug, used to disambiguate when multiple modules match
-#   GITHUB_OUTPUT  receives jar_file=<resolved path>
+#   REQUESTED_JAR  path/override glob relative to the build context; when empty, defaults to
+#                  the conventional provider/<IMAGE_NAME>-azure/target/*-spring-boot.jar
+#   IMAGE_NAME     service slug — the default-path stem and the multi-match tiebreaker
+#   BUILD_CONTEXT  Docker build context directory (default ".")
+#   GITHUB_OUTPUT  receives jar_file=<resolved path> when set
+#
+# Local test (from a dir containing provider/<svc>-azure/target/*-spring-boot.jar):
+#   IMAGE_NAME=partition GITHUB_OUTPUT=/dev/stdout ./resolve-jar.sh
 
 set -euo pipefail
 shopt -s nullglob
 
 REQUESTED_JAR="${REQUESTED_JAR:-}"
 IMAGE_NAME="${IMAGE_NAME:-}"
+BUILD_CONTEXT="${BUILD_CONTEXT:-.}"
+
+# COPY is build-context-relative and artifacts download into the context: resolve there.
+cd "$BUILD_CONTEXT"
+
+# Fall back to the conventional path when the caller passes no jar_file.
+if [[ -z "$REQUESTED_JAR" ]]; then
+  if [[ -z "$IMAGE_NAME" ]]; then
+    echo "::error::Provide jar_file or image_name so the service JAR can be resolved."
+    exit 1
+  fi
+  REQUESTED_JAR="provider/${IMAGE_NAME}-azure/target/*-spring-boot.jar"
+fi
 
 resolved=""
 
@@ -56,5 +77,7 @@ else
   fi
 fi
 
-echo "jar_file=$resolved" >> "$GITHUB_OUTPUT"
-echo "Using JAR: $resolved"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  echo "jar_file=$resolved" >> "$GITHUB_OUTPUT"
+fi
+echo "Resolved service JAR: $resolved"
